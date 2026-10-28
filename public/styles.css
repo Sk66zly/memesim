@@ -282,6 +282,22 @@ main { max-width: 1440px; margin: 0 auto; padding: 18px max(18px, env(safe-area-
 .quick button:hover { color: var(--text); background: var(--surface-3); }
 .tb-est { font-size: 12.5px; color: var(--muted); min-height: 36px; line-height: 1.5; }
 .tb-est b { color: var(--text); }
+.tb-hold { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--line-2); }
+.tb-hold.up { border-color: rgba(74, 222, 128, .35); }
+.tb-hold.down { border-color: rgba(248, 113, 113, .35); }
+.th-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.th-k { color: var(--muted); font-size: 12.5px; }
+.th-v { font-family: var(--mono); font-weight: 700; font-size: 15px; color: var(--text); text-align: right; overflow-wrap: anywhere; }
+.th-sub { font-size: 12.5px; }
+.th-grid { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.th-grid .k { color: var(--dim); }
+.th-grid .v { text-align: right; font-family: var(--mono); color: var(--text); }
+.th-pnl { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; font-family: var(--mono); font-size: 15px; }
+.th-pnl span { font-family: var(--sans); font-size: 12.5px; font-weight: 600; margin-right: auto; }
+.th-pnl.up { background: var(--up-soft); }
+.th-pnl.down { background: var(--down-soft); }
+.th-pnl.tick-up { animation: pnlUp .6s ease-out; }
+.th-pnl.tick-down { animation: pnlDown .6s ease-out; }
 .tb-bal { display: flex; justify-content: space-between; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 /* ---------- positions ---------- */
