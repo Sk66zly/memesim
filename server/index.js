@@ -149,6 +149,12 @@ async function api(req, res, url) {
     if (!t) throw new game.GameError('Token not found on Solana.', 404);
     return send(res, 200, { token: t, tape: market.tapeFor(match[1]).slice(0, 40) });
   }
+  if ((match = p.match(/^\/api\/holders\/([A-Za-z0-9]{20,64})$/)) && m === 'GET') {
+    if (!rateLimit(`holders:${ip(req)}`, 30, 60_000)) throw new game.GameError('Slow down a little.', 429);
+    const d = await market.topHolders(match[1]).catch(() => null);
+    if (!d) throw new game.GameError('Holder list is not set up on this server.', 501);
+    return send(res, 200, d);
+  }
   if ((match = p.match(/^\/api\/candles\/([A-Za-z0-9]{20,64})$/)) && m === 'GET') {
     const tf = Math.max(1, Math.min(240, Number(url.searchParams.get('tf')) || 1));
     return send(res, 200, await market.getCandles(match[1], tf));
