@@ -96,6 +96,14 @@ CREATE TABLE IF NOT EXISTS deposits (
 );
 CREATE INDEX IF NOT EXISTS deposits_user_ts ON deposits(user_id, ts);
 
+-- Uploaded profile pictures (small, resized in the browser before upload).
+CREATE TABLE IF NOT EXISTS avatars (
+  user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  mime        TEXT NOT NULL,
+  data        TEXT NOT NULL,              -- base64 image
+  updated_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS badges (
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   badge      TEXT NOT NULL,
@@ -128,6 +136,7 @@ const TABLES = {
   badges: ['user_id', 'badge'],
   watchlist: ['user_id', 'token'],
   deposits: ['id'],
+  avatars: ['user_id'],
 };
 
 // Small helper so multi-step writes either fully happen or not at all.
