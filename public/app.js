@@ -151,7 +151,7 @@ function connectStream() {
     S.trending = d.tokens.map((t) => t.address);
     S.source = d.source || null;
     const allPump = d.tokens.length && d.tokens.every((t) => t.isPump);
-    $('#listTitle').textContent = S.source === 'pump.fun' || allPump ? 'Trending on pump.fun' : 'Trending on Solana';
+    $('#listTitle').textContent = S.source === 'pump.fun' || allPump ? 'Hot pump.fun coins' : 'Trending on Solana';
     for (const t of d.tokens) S.tokens.set(t.address, { ...S.tokens.get(t.address), ...t });
     renderCoinList();
     renderTicker();
@@ -738,7 +738,7 @@ function applyLivePair(addr, pair) {
   const final = keepTradePrice(addr, next);
   const dir = prev.priceUsd ? Math.sign(final.priceUsd - prev.priceUsd) : 0;
   S.tokens.set(addr, final);
-  if (addr === S.selected) onSelectedTick(final, dir);
+  if (addr === S.selected) { priceTick(addr, final.priceUsd); onSelectedTick(final, dir); }
   updateCoinRow(addr, dir);
   repricePosition(addr, final.priceUsd);
 }
@@ -1211,6 +1211,25 @@ async function browserHistory(addr, tf) {
 // Every trade goes into one store that drives the 1s/15s candles, the trades list and the top-traders table.
 let tapeBusy = false;
 let tapePauseUntil = 0;
+let tapeFails = 0;
+function setFeedHint() {
+  const el = $('#chartHint');
+  if (!el) return;
+  const busy = tapeFails >= 2;
+  el.innerHTML = busy ? '<span class="live-pip" aria-hidden="true" style="background:var(--amber)"></span>Trade feed busy · following live price'
+    : '<span class="live-pip" aria-hidden="true"></span>Live on-chain trades';
+}
+// When no new on-chain trade has come in for a few seconds (quiet coin, or the trade feed is rate-limited),
+// keep the candles moving with the 1-second price feed so the chart never freezes.
+function priceTick(addr, price) {
+  if (addr !== S.selected || !(price > 0) || String(addr).startsWith('DEMO')) return;
+  if (Date.now() - (S.tradeFeedAt || 0) < 8000) return;
+  const last = S.trades[S.trades.length - 1];
+  if (last && last.price === price && Date.now() - last.ts < 30_000) return;
+  const now = Date.now();
+  S.trades.push({ id: `tick${now}`, ts: now, price, usd: 0, tick: true });
+  if (S.tf < 60) redrawTradeChart();
+}
 const tradeKey = { addr: null, newest: 0 };
 function addTrades(list, fresh) {
   const add = [];
@@ -1286,7 +1305,14 @@ async function pollTrades() {
         api('/api/relay', { pairs: [{ chainId: 'solana', dexId: t.dexId || 'pumpfun', pairAddress: t.pairAddress, baseToken: { address: addr, name: t.name, symbol: t.symbol }, priceUsd: String(last.price), marketCap: S.tokens.get(addr)?.marketCap, info: { imageUrl: t.image || undefined } }] }).catch(() => {});
       }
     }
-  } catch (e) { if (String(e.message) === '429') tapePauseUntil = Date.now() + 20_000; } finally { tapeBusy = false; }
+    tapeFails = 0;
+    setFeedHint();
+  } catch {
+    // GeckoTerminal's "too many requests" reply has no CORS headers, so it shows up as a network error: back off
+    tapeFails++;
+    tapePauseUntil = Date.now() + Math.min(30_000, 3000 * 2 ** Math.min(tapeFails, 4));
+    setFeedHint();
+  } finally { tapeBusy = false; }
 }
 setInterval(pollTrades, 3000);
 
@@ -1330,7 +1356,7 @@ setInterval(async () => {
   if (!S.info.get(S.selected)?.holders) { loadCoinInfo(S.selected); return; }
   await loadPool(S.selected);
   renderSidePanels();
-}, 20_000);
+}, 30_000);
 function athOf(addr) {
   const t = S.tokens.get(addr);
   const info = S.info.get(addr);
@@ -1463,8 +1489,9 @@ function renderTraders() {
   }
   const list = [...by.values()].map((w) => ({ ...w, pnl: w.sold - w.bought + Math.max(0, w.qty) * (t.priceUsd || 0) }))
     .sort((a, b) => (b.bought + b.sold) - (a.bought + a.sold)).slice(0, 50);
-  const span = S.trades.length ? ago(S.trades[0].ts) : '';
-  $('#tradersPane').innerHTML = list.length ? `<div class="pane-note muted small">From the last ${fmtInt(S.trades.length)} on-chain trades (${span}). PnL = sold + still held − bought, within that window.</div>
+  const real = S.trades.filter((x) => !x.tick);
+  const span = real.length ? ago(real[0].ts) : '';
+  $('#tradersPane').innerHTML = list.length ? `<div class="pane-note muted small">From the last ${fmtInt(real.length)} on-chain trades (${span}). PnL = sold + still held − bought, within that window.</div>
     <div class="tbl-head h6"><span>Trader</span><span class="r">Bought</span><span class="r">Sold</span><span class="r">PnL</span><span class="r">Trades</span><span class="r">Last</span></div>` +
     list.map((w) => `<div class="tbl-row h6"><a class="mono" href="${solscan(w.trader)}" target="_blank" rel="noopener">${esc(shortAddr(w.trader))}</a>
       <span class="r mono up">${fmtUsd(w.bought, { compact: true })}</span><span class="r mono down">${fmtUsd(w.sold, { compact: true })}</span>
