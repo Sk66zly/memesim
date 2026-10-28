@@ -1,6 +1,6 @@
 // Service worker: makes MemeSim installable and lets the app shell open instantly.
 // Market data and account calls always go to the network (they must be live).
-const CACHE = 'memesim-v1';
+const CACHE = 'memesim-v2';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/chart.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -14,7 +14,7 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
   // network first, fall back to cache (so updates show up right away when online)
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then((res) => {
         if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); }
         return res;
