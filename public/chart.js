@@ -1,70 +1,97 @@
-// Interactive canvas candlestick chart: drag to pan, wheel/pinch to zoom, crosshair, tap to trade.
+// Interactive canvas chart with two modes:
+//   'line'    — live feed: a streaming price line that scrolls in real time (default)
+//   'candles' — classic OHLC candlesticks (1m / 5m / 15m / 1h)
+// Drag to pan, wheel or pinch to zoom, tap to open trading.
 export class CandleChart {
   constructor(container, { onActivate, formatPrice } = {}) {
     this.el = container;
     this.onActivate = onActivate || (() => {});
     this.fmt = formatPrice || ((p) => p.toPrecision(4));
+    this.mode = 'line';
+    this.mult = 1;            // display value = price * mult (1 = price, supply = market cap)
+    // candles
     this.data = [];
-    this.barW = 9;          // px per candle (zoom)
-    this.offset = 0;        // candles scrolled back from the right edge
-    this.hover = null;      // {x, y}
-    this.lines = [];        // [{price, label, color}]
+    this.barW = 9;
+    this.offset = 0;
+    // live line
+    this.points = [];         // [{t: ms, p: price}] ascending
+    this.windowMs = 3 * 60_000;
+    this.offsetMs = 0;        // how far back from "now" the right edge is (0 = live)
+    this.shownLast = null;    // eased last value, so the line glides instead of jumping
+    this.range = null;        // eased y-range
+    this.markers = [];        // [{t, side}]
+    this.lines = [];          // [{price, label, color}]
+    this.hover = null;
     this.flash = 0;
 
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'chart-canvas';
     this.canvas.setAttribute('role', 'img');
-    this.canvas.setAttribute('aria-label', 'Price chart. Drag to pan, scroll to zoom, tap to open trading.');
+    this.canvas.setAttribute('aria-label', 'Price chart. Drag to look back, scroll or pinch to zoom, tap to trade.');
     this.el.appendChild(this.canvas);
     this.ctx = this.canvas.getContext('2d');
 
     this.pointers = new Map();
     this.dragStart = null;
     this.pinchDist = null;
-
     const c = this.canvas;
     c.addEventListener('pointerdown', (e) => this.onDown(e));
     c.addEventListener('pointermove', (e) => this.onMove(e));
     c.addEventListener('pointerup', (e) => this.onUp(e));
     c.addEventListener('pointercancel', (e) => this.onUp(e, true));
     c.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { this.hover = null; this.draw(); } });
-    c.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      this.zoom(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.offsetX);
-    }, { passive: false });
+    c.addEventListener('wheel', (e) => { e.preventDefault(); this.zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.offsetX); }, { passive: false });
 
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(this.el);
     this.resize();
+    this.loop = this.loop.bind(this);
+    requestAnimationFrame(this.loop);
   }
 
-  // ---------- data ----------
-  setData(candles, { keepView = false } = {}) {
-    this.data = candles.slice();
-    if (!keepView) { this.offset = 0; }
-    this.draw();
-  }
+  // ---------- public API ----------
+  setMode(mode) { this.mode = mode === 'candles' ? 'candles' : 'line'; this.hover = null; this.range = null; this.draw(); }
+  setValueScale(mult) { this.mult = mult > 0 ? mult : 1; this.range = null; this.draw(); }
+  setData(candles, { keepView = false } = {}) { this.data = candles.slice(); if (!keepView) this.offset = 0; this.range = null; this.draw(); }
   update(candle) {
     const last = this.data[this.data.length - 1];
     if (last && last.time === candle.time) Object.assign(last, candle);
-    else if (!last || candle.time > last.time) {
-      this.data.push(candle);
-      if (this.offset > 0) this.offset += 1; // keep the user's view still while they browse history
-    }
+    else if (!last || candle.time > last.time) { this.data.push(candle); if (this.offset > 0) this.offset += 1; }
     this.flash = performance.now();
     this.draw();
   }
+  setPoints(points) {
+    this.points = points.filter((p) => p.p > 0).sort((a, b) => a.t - b.t);
+    this.shownLast = null; this.range = null;
+    this.draw();
+  }
+  pushPoint(t, p) {
+    if (!(p > 0)) return;
+    const pts = this.points;
+    const last = pts[pts.length - 1];
+    if (last && Math.floor(last.t / 1000) === Math.floor(t / 1000)) { last.p = p; last.t = t; }
+    else if (!last || t > last.t) pts.push({ t, p });
+    if (pts.length > 8000) pts.splice(0, pts.length - 8000);
+    this.flash = performance.now();
+  }
   setLines(lines) { this.lines = lines || []; this.draw(); }
+  setMarkers(markers) { this.markers = markers || []; this.draw(); }
+  resetView() { this.offset = 0; this.offsetMs = 0; this.range = null; this.draw(); }
+  get isLive() { return this.mode === 'line' && this.offsetMs < 1000; }
+  windowLabel() {
+    const s = Math.round(this.windowMs / 1000);
+    return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(s % 3600 ? 1 : 0)}h`;
+  }
 
   // ---------- interaction ----------
   onDown(e) {
     this.canvas.setPointerCapture(e.pointerId);
     this.pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
-    if (this.pointers.size === 1) this.dragStart = { x: e.offsetX, y: e.offsetY, offset: this.offset, moved: false };
+    if (this.pointers.size === 1) this.dragStart = { x: e.offsetX, y: e.offsetY, offset: this.offset, offsetMs: this.offsetMs, moved: false };
     if (this.pointers.size === 2) {
       const [a, b] = [...this.pointers.values()];
       this.pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
-      this.pinchBar = this.barW;
+      this.pinchStart = { barW: this.barW, windowMs: this.windowMs };
       if (this.dragStart) this.dragStart.moved = true;
     }
   }
@@ -72,17 +99,21 @@ export class CandleChart {
     if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
     if (this.pointers.size === 2 && this.pinchDist) {
       const [a, b] = [...this.pointers.values()];
-      const d = Math.hypot(a.x - b.x, a.y - b.y);
-      this.barW = clamp(this.pinchBar * (d / this.pinchDist), 2, 40);
-      this.clampOffset();
+      const f = Math.hypot(a.x - b.x, a.y - b.y) / this.pinchDist;
+      if (this.mode === 'candles') { this.barW = clamp(this.pinchStart.barW * f, 2, 40); this.clampOffset(); }
+      else this.windowMs = clamp(this.pinchStart.windowMs / f, 20_000, 6 * 3600_000);
       this.draw();
       return;
     }
     if (this.dragStart && this.pointers.size === 1) {
       const dx = e.offsetX - this.dragStart.x;
       if (Math.abs(dx) > 4 || Math.abs(e.offsetY - this.dragStart.y) > 4) this.dragStart.moved = true;
-      this.offset = this.dragStart.offset + dx / this.barW;
-      this.clampOffset();
+      if (this.mode === 'candles') { this.offset = this.dragStart.offset + dx / this.barW; this.clampOffset(); }
+      else {
+        const msPerPx = this.windowMs / Math.max(1, this.plotW - 10);
+        const oldest = this.points.length ? Date.now() - this.points[0].t : 0;
+        this.offsetMs = clamp(this.dragStart.offsetMs + dx * msPerPx, 0, Math.max(0, oldest - this.windowMs * 0.3));
+      }
     }
     this.hover = { x: e.offsetX, y: e.offsetY };
     this.draw();
@@ -92,16 +123,18 @@ export class CandleChart {
     this.pointers.delete(e.pointerId);
     if (this.pointers.size < 2) this.pinchDist = null;
     if (this.pointers.size === 0) {
-      if (wasTap) {
-        const price = this.priceAt(e.offsetY);
-        this.onActivate({ price });
-      }
+      if (wasTap) this.onActivate({ value: this.valueAt(e.offsetY) });
       this.dragStart = null;
-      if (e.pointerType !== 'mouse') { setTimeout(() => { this.hover = null; this.draw(); }, 1200); }
+      if (e.pointerType !== 'mouse') setTimeout(() => { this.hover = null; this.draw(); }, 1200);
     }
   }
   zoom(factor, anchorX) {
-    // keep the candle under the cursor in the same spot while zooming
+    if (this.mode === 'line') {
+      this.windowMs = clamp(this.windowMs / factor, 20_000, 6 * 3600_000);
+      this.range = null;
+      this.draw();
+      return;
+    }
     const n = this.data.length;
     const ax = this.plotW - 6 - (anchorX ?? this.plotW);
     const idx = n - this.offset - 0.5 - ax / this.barW;
@@ -114,7 +147,6 @@ export class CandleChart {
     const visible = this.plotW / this.barW;
     this.offset = clamp(this.offset, -visible * 0.4, Math.max(0, this.data.length - visible * 0.3));
   }
-  resetView() { this.offset = 0; this.draw(); }
 
   // ---------- layout ----------
   resize() {
@@ -129,181 +161,335 @@ export class CandleChart {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.draw();
   }
-  get axisW() { return 74; }
-  get timeH() { return 22; }
+  get axisW() { return this.mult > 1 ? 70 : 78; }
+  get timeH() { return 24; }
   get plotW() { return (this.w || 300) - this.axisW; }
   get plotH() { return (this.h || 200) - this.timeH; }
-
-  visibleRange() {
-    const n = this.data.length;
-    const visible = Math.ceil(this.plotW / this.barW) + 1;
-    const end = Math.min(n, Math.ceil(n - this.offset));
-    const start = Math.max(0, end - visible);
-    return { start, end };
-  }
-  xOf(i) { // centre x of candle index i
-    const n = this.data.length;
-    return this.plotW - (n - this.offset - i - 0.5) * this.barW - 6;
-  }
-  priceAt(y) {
+  valueAt(y) {
     if (!this.scale) return null;
     const { min, max, top, bottom } = this.scale;
     return max - ((y - top) / (bottom - top)) * (max - min);
   }
 
   // ---------- drawing ----------
-  draw() {
-    if (this.raf) return;
-    this.raf = requestAnimationFrame(() => { this.raf = null; this.paint(); });
+  draw() { this.dirty = true; }
+  loop() {
+    requestAnimationFrame(this.loop);
+    const now = performance.now();
+    // the live line scrolls continuously; everything else redraws only when something changed
+    const live = this.mode === 'line' && !document.hidden;
+    if (!this.dirty && !(live && now - (this.lastPaint || 0) > 33)) return;
+    this.dirty = false;
+    this.lastPaint = now;
+    this.colors = this.colors && now - this.colorsAt < 2000 ? this.colors : this.readColors(now);
+    if (this.mode === 'line') this.paintLine(); else this.paintCandles();
   }
-  paint() {
-    const ctx = this.ctx, W = this.w, H = this.h, PW = this.plotW, PH = this.plotH;
+  readColors(now) {
+    this.colorsAt = now;
     const css = getComputedStyle(document.documentElement);
-    const up = css.getPropertyValue('--up').trim() || '#a6ff00';
-    const down = css.getPropertyValue('--down').trim() || '#ff2e88';
-    const grid = css.getPropertyValue('--grid').trim() || '#11181a';
-    const muted = css.getPropertyValue('--muted').trim() || '#5d6f66';
-    const text = css.getPropertyValue('--text').trim() || '#e6f2ea';
-    ctx.clearRect(0, 0, W, H);
+    const g = (n, d) => css.getPropertyValue(n).trim() || d;
+    return { up: g('--up', '#4ade80'), down: g('--down', '#f87171'), grid: g('--grid', '#1c1c21'), muted: g('--muted', '#a1a1aa'), text: g('--text', '#e4e4e7'), panel: g('--surface', '#141418') };
+  }
+  font(px, weight = 500) { return `${weight} ${px}px "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace`; }
 
-    if (!this.data.length) {
-      ctx.fillStyle = muted;
-      ctx.font = '12px "JetBrains Mono", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('waiting for price data…', PW / 2, PH / 2);
-      return;
-    }
-    const { start, end } = this.visibleRange();
-    const vis = this.data.slice(start, end);
-    let min = Infinity, max = -Infinity, vmax = 0;
-    for (const c of vis) { min = Math.min(min, c.low); max = Math.max(max, c.high); vmax = Math.max(vmax, c.volume || 0); }
-    for (const l of this.lines) if (l.price > 0 && l.price < max * 3 && l.price > min / 3) { min = Math.min(min, l.price); max = Math.max(max, l.price); }
-    if (min === max) { min *= 0.98; max *= 1.02; }
-    const pad = (max - min) * 0.08;
-    min -= pad; max += pad;
-    const top = 10, bottom = PH - 4;
-    this.scale = { min, max, top, bottom };
-    const y = (p) => top + ((max - p) / (max - min)) * (bottom - top);
-
-    // grid + price axis
-    ctx.font = '11px "JetBrains Mono", monospace';
+  axisAndGrid(min, max, top, bottom, toY) {
+    const { ctx } = this; const { grid, muted } = this.colors;
+    const PW = this.plotW, PH = this.plotH;
+    ctx.font = this.font(11);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    const ticks = niceTicks(min, max, Math.max(3, Math.floor(PH / 46)));
-    for (const t of ticks) {
-      const yy = Math.round(y(t)) + 0.5;
+    for (const t of niceTicks(min, max, Math.max(3, Math.floor(PH / 52)))) {
+      const yy = Math.round(toY(t)) + 0.5;
       ctx.strokeStyle = grid; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(PW, yy); ctx.stroke();
       ctx.fillStyle = muted;
-      ctx.fillText(this.fmt(t), PW + 6, yy);
+      ctx.fillText(this.fmt(t), PW + 8, yy);
     }
-    // axis divider
-    ctx.strokeStyle = grid;
-    ctx.beginPath(); ctx.moveTo(PW + 0.5, 0); ctx.lineTo(PW + 0.5, H); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, PH + 0.5); ctx.lineTo(W, PH + 0.5); ctx.stroke();
+  }
 
-    // time axis labels
+  paintLine() {
+    const { ctx } = this; const { up, down, grid, muted, text } = this.colors;
+    const W = this.w, H = this.h, PW = this.plotW, PH = this.plotH;
+    ctx.clearRect(0, 0, W, H);
+    const pts = this.points;
+    if (!pts.length) { this.emptyText('waiting for live price…'); return; }
+    const now = Date.now();
+    const tRight = now - this.offsetMs;
+    const tLeft = tRight - this.windowMs;
+    const innerW = PW - 14;
+    const x = (t) => ((t - tLeft) / this.windowMs) * innerW;
+
+    // visible slice (+1 point on the left so the line enters from the edge)
+    let i0 = 0;
+    while (i0 < pts.length - 1 && pts[i0 + 1].t < tLeft) i0++;
+    let i1 = pts.length - 1;
+    while (i1 > i0 && pts[i1].t > tRight) i1--;
+    const vis = pts.slice(i0, i1 + 1);
+    const lastReal = pts[pts.length - 1].p * this.mult;
+    if (this.shownLast == null) this.shownLast = lastReal;
+    this.shownLast += (lastReal - this.shownLast) * 0.22; // glide to the new price
+    const endVal = this.isLive ? this.shownLast : vis[vis.length - 1].p * this.mult;
+
+    let lo = Infinity, hi = -Infinity;
+    for (const p of vis) { const v = p.p * this.mult; lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    lo = Math.min(lo, endVal); hi = Math.max(hi, endVal);
+    for (const l of this.lines) { const v = l.price * this.mult; if (v > lo / 1.6 && v < hi * 1.6) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }
+    if (!(hi > lo)) { const m = (hi || 1) * 0.004; lo -= m; hi += m; }
+    const pad = (hi - lo) * 0.16;
+    const target = { min: lo - pad, max: hi + pad };
+    if (!this.range) this.range = { ...target };
+    this.range.min += (target.min - this.range.min) * 0.18;
+    this.range.max += (target.max - this.range.max) * 0.18;
+    const { min, max } = this.range;
+    const top = 14, bottom = PH - 8;
+    this.scale = { min, max, top, bottom };
+    const y = (v) => top + ((max - v) / (max - min)) * (bottom - top);
+
+    this.axisAndGrid(min, max, top, bottom, y);
+    // time axis
+    const stepS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200].find((s) => (s * 1000 / this.windowMs) * innerW >= 84) || 7200;
+    ctx.textAlign = 'center';
+    ctx.font = this.font(11);
+    for (let t = Math.ceil(tLeft / (stepS * 1000)) * stepS * 1000; t <= tRight; t += stepS * 1000) {
+      const xx = Math.round(x(t)) + 0.5;
+      ctx.strokeStyle = grid;
+      ctx.beginPath(); ctx.moveTo(xx, 0); ctx.lineTo(xx, PH); ctx.stroke();
+      ctx.fillStyle = muted;
+      const d = new Date(t);
+      ctx.fillText(stepS < 60 ? d.toLocaleTimeString([], { hour12: false }) : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), xx, PH + 13);
+    }
+
+    const firstVal = vis[0].p * this.mult;
+    const col = endVal >= firstVal ? up : down;
+    // path: steps between ticks look like a real tape; final segment extends to "now"
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, PW, PH); ctx.clip();
+    const path = new Path2D();
+    let prevY = null;
+    vis.forEach((p, i) => {
+      const xx = Math.max(-2, x(p.t)), yy = y(i === vis.length - 1 && this.isLive ? endVal : p.p * this.mult);
+      if (i === 0) path.moveTo(xx, yy);
+      else { path.lineTo(xx, prevY); path.lineTo(xx, yy); }
+      prevY = yy;
+    });
+    const endX = this.isLive ? x(now) : x(vis[vis.length - 1].t);
+    path.lineTo(endX, y(endVal));
+    // area
+    const area = new Path2D(path);
+    area.lineTo(endX, PH);
+    area.lineTo(Math.max(-2, x(vis[0].t)), PH);
+    area.closePath();
+    const grad = ctx.createLinearGradient(0, top, 0, PH);
+    grad.addColorStop(0, hexA(col, 0.28));
+    grad.addColorStop(1, hexA(col, 0));
+    ctx.fillStyle = grad;
+    ctx.fill(area);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke(path);
+
+    // trade markers
+    for (const m of this.markers) {
+      if (m.t < tLeft || m.t > tRight) continue;
+      const v = valueAtTime(pts, m.t) * this.mult;
+      const mx = x(m.t), my = y(v);
+      const c2 = m.side === 'buy' ? up : down;
+      ctx.fillStyle = c2;
+      ctx.beginPath(); ctx.arc(mx, my, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#0b0b0e';
+      ctx.font = this.font(10, 800);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(m.side === 'buy' ? 'B' : 'S', mx, my + 0.5);
+    }
+    // live dot with a pulse
+    const ey = y(endVal);
+    if (this.isLive) {
+      const ph = (performance.now() % 1600) / 1600;
+      ctx.fillStyle = hexA(col, 0.35 * (1 - ph));
+      ctx.beginPath(); ctx.arc(endX, ey, 4 + ph * 12, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(endX, ey, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    this.refLines(y, min, max);
+    // current value line + label
+    ctx.setLineDash([3, 4]);
+    ctx.strokeStyle = hexA(col, 0.55);
+    ctx.beginPath(); ctx.moveTo(0, Math.round(ey) + 0.5); ctx.lineTo(PW, Math.round(ey) + 0.5); ctx.stroke();
+    ctx.setLineDash([]);
+    const flashing = performance.now() - this.flash < 350;
+    pill(ctx, this.fmt(endVal), PW + 3, ey, flashing ? '#ffffff' : col, '#0b0b0e', this.axisW - 6, this.font(11, 700));
+    if (!this.isLive) {
+      ctx.font = this.font(11, 600);
+      ctx.textAlign = 'right'; ctx.fillStyle = muted;
+      ctx.fillText('viewing history · tap Latest to go live', PW - 8, 12);
+    }
+    // crosshair
+    if (this.hover && this.hover.x < PW && this.hover.y < PH) {
+      const t = tLeft + (this.hover.x / innerW) * this.windowMs;
+      const v = valueAtTime(pts, Math.min(t, pts[pts.length - 1].t)) * this.mult;
+      this.crosshair(this.hover.x, y(v), this.fmt(v), new Date(t).toLocaleTimeString([], { hour12: false }), text);
+    }
+  }
+
+  paintCandles() {
+    const { ctx } = this; const { up, down, grid, muted, text } = this.colors;
+    const W = this.w, H = this.h, PW = this.plotW, PH = this.plotH;
+    ctx.clearRect(0, 0, W, H);
+    if (!this.data.length) { this.emptyText('loading candles…'); return; }
+    const m = this.mult;
+    const { start, end } = this.visibleRange();
+    const vis = this.data.slice(start, end);
+    let min = Infinity, max = -Infinity, vmax = 0;
+    for (const c of vis) { min = Math.min(min, c.low * m); max = Math.max(max, c.high * m); vmax = Math.max(vmax, c.volume || 0); }
+    for (const l of this.lines) { const v = l.price * m; if (v < max * 3 && v > min / 3) { min = Math.min(min, v); max = Math.max(max, v); } }
+    if (min === max) { min *= 0.98; max *= 1.02; }
+    const pad = (max - min) * 0.08;
+    min -= pad; max += pad;
+    const top = 12, bottom = PH - 6;
+    this.scale = { min, max, top, bottom };
+    const y = (v) => top + ((max - v) / (max - min)) * (bottom - top);
+    this.axisAndGrid(min, max, top, bottom, y);
     ctx.textAlign = 'center';
     const every = Math.max(1, Math.round(90 / this.barW));
     for (let i = start; i < end; i++) {
       if (i % every) continue;
-      const x = this.xOf(i);
-      if (x < 20 || x > PW - 20) continue;
+      const xx = this.xOf(i);
+      if (xx < 20 || xx > PW - 20) continue;
       ctx.fillStyle = muted;
-      ctx.fillText(timeLabel(this.data[i].time, this.data), x, PH + 12);
+      ctx.fillText(timeLabel(this.data[i].time, this.data), xx, PH + 13);
       ctx.strokeStyle = grid;
-      ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, PH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(Math.round(xx) + 0.5, 0); ctx.lineTo(Math.round(xx) + 0.5, PH); ctx.stroke();
     }
-
-    // volume
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, PW, PH); ctx.clip();
     if (vmax > 0) {
       for (let i = start; i < end; i++) {
         const c = this.data[i];
-        const vh = ((c.volume || 0) / vmax) * PH * 0.18;
-        ctx.fillStyle = (c.close >= c.open ? up : down) + '22';
+        const vh = ((c.volume || 0) / vmax) * PH * 0.16;
+        ctx.fillStyle = hexA(c.close >= c.open ? up : down, 0.18);
         const bw = Math.max(1, this.barW * 0.7);
         ctx.fillRect(this.xOf(i) - bw / 2, PH - vh, bw, vh);
       }
     }
-    // candles
-    const bw = Math.max(1, this.barW * 0.68);
+    const bw = Math.max(1, this.barW * 0.7);
     for (let i = start; i < end; i++) {
       const c = this.data[i];
-      const x = this.xOf(i);
+      const xx = this.xOf(i);
       const col = c.close >= c.open ? up : down;
       ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, y(c.high)); ctx.lineTo(Math.round(x) + 0.5, y(c.low)); ctx.stroke();
-      const yo = y(c.open), yc = y(c.close);
-      const h = Math.max(1, Math.abs(yc - yo));
-      if (c.close >= c.open) ctx.fillRect(x - bw / 2, Math.min(yo, yc), bw, h);
-      else ctx.fillRect(x - bw / 2, Math.min(yo, yc), bw, h);
+      ctx.beginPath(); ctx.moveTo(Math.round(xx) + 0.5, y(c.high * m)); ctx.lineTo(Math.round(xx) + 0.5, y(c.low * m)); ctx.stroke();
+      const yo = y(c.open * m), yc = y(c.close * m);
+      ctx.fillRect(xx - bw / 2, Math.min(yo, yc), bw, Math.max(1, Math.abs(yc - yo)));
     }
     ctx.restore();
-
-    // reference lines (avg entry etc.)
-    for (const l of this.lines) {
-      if (!(l.price > min && l.price < max)) continue;
-      const yy = Math.round(y(l.price)) + 0.5;
-      ctx.setLineDash([2, 4]);
-      ctx.strokeStyle = l.color; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(PW, yy); ctx.stroke();
-      ctx.setLineDash([]);
-      label(ctx, `${l.label} ${this.fmt(l.price)}`, 6, yy, l.color, '#000', 'left');
-    }
-
-    // last price line
+    this.refLines(y, min, max);
     const last = this.data[this.data.length - 1];
     const lastCol = last.close >= last.open ? up : down;
-    const ly = Math.round(y(last.close)) + 0.5;
-    ctx.setLineDash([4, 3]);
-    ctx.strokeStyle = lastCol + 'aa';
+    const ly = Math.round(y(last.close * m)) + 0.5;
+    ctx.setLineDash([3, 4]);
+    ctx.strokeStyle = hexA(lastCol, 0.6);
     ctx.beginPath(); ctx.moveTo(0, ly); ctx.lineTo(PW, ly); ctx.stroke();
     ctx.setLineDash([]);
-    const flashing = performance.now() - this.flash < 400;
-    label(ctx, this.fmt(last.close), PW + 2, ly, flashing ? '#ffffff' : lastCol, '#000', 'axis', this.axisW - 4);
-    if (flashing) setTimeout(() => this.draw(), 420);
-
-    // crosshair
+    const flashing = performance.now() - this.flash < 350;
+    pill(ctx, this.fmt(last.close * m), PW + 3, ly, flashing ? '#ffffff' : lastCol, '#0b0b0e', this.axisW - 6, this.font(11, 700));
     if (this.hover && this.hover.x < PW && this.hover.y < PH) {
-      const { x: hx, y: hy } = this.hover;
       const n = this.data.length;
-      const i = Math.round(n - this.offset - 0.5 - (this.plotW - 6 - hx) / this.barW);
-      ctx.strokeStyle = text + '55'; ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(0, Math.round(hy) + 0.5); ctx.lineTo(PW, Math.round(hy) + 0.5); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(Math.round(hx) + 0.5, 0); ctx.lineTo(Math.round(hx) + 0.5, PH); ctx.stroke();
-      ctx.setLineDash([]);
-      label(ctx, this.fmt(this.priceAt(hy)), PW + 2, hy, '#1d2a24', text, 'axis', this.axisW - 4);
+      const i = Math.round(n - this.offset - 0.5 - (this.plotW - 6 - this.hover.x) / this.barW);
       const c = this.data[i];
+      this.crosshair(this.hover.x, this.hover.y, this.fmt(this.valueAt(this.hover.y)),
+        c ? new Date(c.time * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '', text);
       if (c) {
-        const col = c.close >= c.open ? up : down;
         const chg = ((c.close / c.open - 1) * 100).toFixed(2);
-        const s = `O ${this.fmt(c.open)}  H ${this.fmt(c.high)}  L ${this.fmt(c.low)}  C ${this.fmt(c.close)}  ${chg > 0 ? '+' : ''}${chg}%`;
-        ctx.font = '11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'left';
-        ctx.fillStyle = '#000000cc';
-        ctx.fillRect(4, 2, Math.min(PW - 8, ctx.measureText(s).width + 10), 18);
-        ctx.fillStyle = col;
-        ctx.fillText(s, 9, 11);
-        label(ctx, new Date(c.time * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }), hx, PH + 11, '#1d2a24', text, 'center');
+        const s = `O ${this.fmt(c.open * m)}  H ${this.fmt(c.high * m)}  L ${this.fmt(c.low * m)}  C ${this.fmt(c.close * m)}  ${chg > 0 ? '+' : ''}${chg}%`;
+        ctx.font = this.font(11);
+        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = hexA(this.colors.panel, 0.9);
+        ctx.fillRect(6, 4, Math.min(PW - 12, ctx.measureText(s).width + 12), 20);
+        ctx.fillStyle = c.close >= c.open ? up : down;
+        ctx.fillText(s, 12, 14);
       }
     }
+  }
+  visibleRange() {
+    const n = this.data.length;
+    const visible = Math.ceil(this.plotW / this.barW) + 1;
+    const end = Math.min(n, Math.ceil(n - this.offset));
+    return { start: Math.max(0, end - visible), end };
+  }
+  xOf(i) { return this.plotW - (this.data.length - this.offset - i - 0.5) * this.barW - 6; }
+
+  refLines(y, min, max) {
+    const { ctx } = this;
+    for (const l of this.lines) {
+      const v = l.price * this.mult;
+      if (!(v > min && v < max)) continue;
+      const yy = Math.round(y(v)) + 0.5;
+      ctx.setLineDash([2, 4]);
+      ctx.strokeStyle = l.color; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(this.plotW, yy); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = this.font(10, 700);
+      const s = `${l.label} ${this.fmt(v)}`;
+      pill(ctx, s, 8, yy, l.color, '#0b0b0e', ctx.measureText(s).width + 14, this.font(10, 700));
+    }
+  }
+  crosshair(x, y, valueText, timeText, color) {
+    const { ctx } = this;
+    ctx.strokeStyle = hexA(color, 0.35); ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, Math.round(y) + 0.5); ctx.lineTo(this.plotW, Math.round(y) + 0.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, this.plotH); ctx.stroke();
+    ctx.setLineDash([]);
+    pill(ctx, valueText, this.plotW + 3, y, '#2f2f36', color, this.axisW - 6, this.font(11, 600));
+    if (timeText) {
+      ctx.font = this.font(11, 600);
+      const w = ctx.measureText(timeText).width + 14;
+      pill(ctx, timeText, clamp(x - w / 2, 0, this.plotW - w), this.plotH + 12, '#2f2f36', color, w, this.font(11, 600));
+    }
+  }
+  emptyText(s) {
+    const { ctx } = this;
+    ctx.fillStyle = this.colors.muted;
+    ctx.font = this.font(12);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(s, this.plotW / 2, this.plotH / 2);
   }
   destroy() { this.ro.disconnect(); this.canvas.remove(); }
 }
 
-function label(ctx, s, x, y, bg, fg, align, width) {
-  ctx.font = 'bold 11px "JetBrains Mono", monospace';
-  const w = width || ctx.measureText(s).width + 10;
-  let lx = x;
-  if (align === 'center') lx = x - w / 2;
+// ---------- helpers ----------
+function pill(ctx, s, x, y, bg, fg, width, font) {
+  ctx.font = font;
+  const w = width || ctx.measureText(s).width + 12;
+  const h = 20;
   ctx.fillStyle = bg;
-  ctx.fillRect(lx, y - 9, w, 18);
+  roundRect(ctx, x, y - h / 2, w, h, 5);
+  ctx.fill();
   ctx.fillStyle = fg;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.fillText(s, lx + 5, y + 0.5);
+  ctx.fillText(s, x + 6, y + 0.5);
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function hexA(col, a) {
+  const m = /^#([0-9a-f]{6})$/i.exec(col.trim());
+  if (!m) return col;
+  const n = parseInt(m[1], 16);
+  return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+}
+function valueAtTime(pts, t) {
+  if (!pts.length) return 0;
+  if (t <= pts[0].t) return pts[0].p;
+  let lo = 0, hi = pts.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (pts[mid].t <= t) lo = mid; else hi = mid; }
+  return pts[hi].t <= t ? pts[hi].p : pts[lo].p;
 }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function niceTicks(min, max, count) {
