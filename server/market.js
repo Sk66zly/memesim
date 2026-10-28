@@ -286,9 +286,18 @@ async function fetchDexTokens(addresses) {
   return out;
 }
 
+function watchlistAddresses() {
+  return db.prepare('SELECT token FROM watchlist GROUP BY token ORDER BY COUNT(*) DESC LIMIT 120').all().map((r) => r.token);
+}
 function trackedAddresses() {
   const real = (a) => !a.startsWith('DEMO');
-  return [...new Set([...state.trending.filter(real), ...heldTokenAddresses().filter(real), ...[...state.watchers.keys()].filter(real), SOL_MINT])];
+  return [...new Set([SOL_MINT, ...heldTokenAddresses().filter(real), ...[...state.watchers.keys()].filter(real),
+    ...state.trending.filter(real), ...watchlistAddresses()])].slice(0, 210);
+}
+// A coin someone just started watching: fetch its details now if we can (players' browsers fill in otherwise).
+function rememberToken(address) {
+  if (state.tokens.get(address)?.priceUsd || state.mode !== 'live') return;
+  lookupToken(address).then((t) => persistToken(t)).catch(() => {});
 }
 
 async function pollPrices() {
@@ -341,7 +350,7 @@ let lastPersist = 0;
 function persistHeld() {
   if (Date.now() - lastPersist < 30_000) return;
   lastPersist = Date.now();
-  for (const a of heldTokenAddresses()) persistToken(state.tokens.get(a));
+  for (const a of new Set([...heldTokenAddresses(), ...watchlistAddresses()])) persistToken(state.tokens.get(a));
 }
 
 // Look up a token that isn't on the trending list (e.g. pasted address)
@@ -628,7 +637,7 @@ function runLiveLoops(log) {
 }
 
 module.exports = {
-  start, events, snapshot, publicToken, priceOf, lookupToken, getCandles, watch, relayPlan, ingestRelay,
+  start, events, snapshot, publicToken, priceOf, lookupToken, getCandles, watch, relayPlan, ingestRelay, rememberToken,
   get solPrice() { return state.solPrice; },
   get solUpdatedAt() { return state.solUpdatedAt; },
   get mode() { return state.mode; },
