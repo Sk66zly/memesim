@@ -70,7 +70,7 @@ function serveStatic(req, res, pathname) {
     'cache-control': ext === '.png' || ext === '.ico' ? 'public, max-age=86400' : 'no-cache',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'same-origin',
-    ...(ext === '.html' ? { 'content-security-policy': "default-src 'self'; img-src 'self' https: data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com; frame-ancestors 'none'" } : {}),
+    ...(ext === '.html' ? { 'content-security-policy': "default-src 'self'; img-src 'self' https: data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com; frame-src https://www.geckoterminal.com https://dexscreener.com; frame-ancestors 'none'" } : {}),
   });
   fs.createReadStream(file).pipe(res);
 }
@@ -172,6 +172,11 @@ async function api(req, res, url) {
     return send(res, 200, game.snapshotsFor(needUser().id, Date.now() - days * 864e5));
   }
   if (p === '/api/faucet' && m === 'POST') return send(res, 200, game.faucet(needUser().id));
+  if (p === '/api/reset' && m === 'POST') {
+    const u = needUser();
+    if (!rateLimit(`reset:${u.id}`, 5, 3_600_000)) throw new game.GameError('You can restart up to 5 times an hour.', 429);
+    return send(res, 200, { user: game.resetAccount(u.id, await readBody(req)) });
+  }
   if (p === '/api/deposit' && m === 'POST') {
     const u = needUser();
     if (!rateLimit(`deposit:${u.id}`, 30, 60_000)) throw new game.GameError('Slow down — too many top-ups per minute.', 429);
