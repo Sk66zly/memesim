@@ -48,7 +48,7 @@
           <div class="home-side card" id="homeSide"></div>
         </div>
         <div class="list-head">
-          <h1 class="section-title">Trending on Solana <span class="count" id="coinCount"></span></h1>
+          <h1 class="section-title"><span id="listTitle">Trending on Solana</span> <span class="count" id="coinCount"></span></h1>
           <div class="sort-chips" role="group" aria-label="Sort coins">
             <button class="chip" data-sort="hot" aria-pressed="true">🔥 Hot</button>
             <button class="chip" data-sort="gainers" aria-pressed="false">Top 24h</button>
@@ -113,6 +113,7 @@
 
           <aside class="coin-side">
             <div class="trade-box card" id="tradeBox">
+              <div class="tb-hold" id="tbHold" aria-live="polite" hidden></div>
               <div class="tb-sides" role="tablist" aria-label="Order side">
                 <button class="side buy" data-side="buy" aria-selected="true">Buy</button>
                 <button class="side sell" data-side="sell" aria-selected="false">Sell</button>
