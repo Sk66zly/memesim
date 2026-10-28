@@ -464,7 +464,22 @@ function leaderboard(range, meId) {
   return { range, total: rows.length, top: rows.slice(0, 100).map(({ userId, ...r }) => ({ ...r, isMe: userId === meId })), me: me && (({ userId, ...r }) => ({ ...r, isMe: true }))(me) };
 }
 
+// ---------------- restart ----------------
+// Start over: back to the starting $1,000 with no coins, trades, top-ups, PnL history or badges.
+// Profile (name, picture, bio) and watchlist are kept.
+function resetAccount(userId, body) {
+  if (body?.confirm !== 'RESET') throw new GameError('Confirm the restart first.');
+  const now = Date.now();
+  tx(() => {
+    for (const t of ['positions', 'trades', 'snapshots', 'deposits', 'badges']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(userId);
+    db.prepare('UPDATE users SET usd = ?, sol = 0, net_deposits = ?, faucet_at = 0, created_at = ? WHERE id = ?').run(CFG.startingUsd, CFG.startingUsd, now, userId);
+    db.prepare('INSERT INTO snapshots (user_id, ts, value, net_deposits, profit) VALUES (?, ?, ?, ?, 0)').run(userId, now, CFG.startingUsd, CFG.startingUsd);
+  });
+  return account(userId);
+}
+
 module.exports = {
+  resetAccount,
   CFG, BADGES, AVATARS, COLORS, GameError, photoFile, register, deposit, updateProfile, publicProfile, setWatch, login, userFromSession, destroySession, account, faucet, trade,
   myTrades, recentFeed, leaderboard, snapshotsFor, takeSnapshots, checkTimedBadges, takeNewBadges, badgesFor,
 };
