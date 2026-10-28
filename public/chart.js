@@ -352,7 +352,6 @@ export class CandleChart {
     const vis = this.data.slice(start, end);
     let min = Infinity, max = -Infinity, vmax = 0;
     for (const c of vis) { min = Math.min(min, c.low * m); max = Math.max(max, c.high * m); vmax = Math.max(vmax, c.volume || 0); }
-    for (const l of this.lines) { const v = l.price * m; if (v < max * 3 && v > min / 3) { min = Math.min(min, v); max = Math.max(max, v); } }
     if (min === max) { min *= 0.98; max *= 1.02; }
     const pad = (max - min) * 0.08;
     min -= pad; max += pad;
@@ -442,7 +441,15 @@ export class CandleChart {
     const { ctx } = this;
     for (const l of this.lines) {
       const v = l.price * this.mult;
-      if (!(v > min && v < max)) continue;
+      ctx.font = this.font(10, 700);
+      if (!(v > min && v < max)) {
+        // off-screen: pin a small label to the top or bottom edge instead of squashing the candles
+        const above = v >= max;
+        const s = `${above ? '↑' : '↓'} ${l.label} ${this.fmt(v)}`;
+        const w = ctx.measureText(s).width + 14;
+        pill(ctx, s, this.plotW - w - 8, above ? this.scale.top - 4 : this.scale.bottom - 12, l.color, '#0b0b0e', w, this.font(10, 700));
+        continue;
+      }
       const yy = Math.round(y(v)) + 0.5;
       ctx.setLineDash([2, 4]);
       ctx.strokeStyle = l.color; ctx.lineWidth = 1;
