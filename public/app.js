@@ -6,7 +6,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const isMobile = () => matchMedia('(max-width: 860px)').matches;
-const isDrawer = () => matchMedia('(max-width: 1240px)').matches;
+const isDrawer = () => matchMedia('(max-width: 860px)').matches;
 
 async function api(path, body) {
   const res = await fetch(path, body === undefined ? { credentials: 'same-origin' } : {
@@ -109,7 +109,11 @@ const S = {
   tokens: new Map(),
   trending: [],
   selected: null,
-  tf: 1,
+  tf: 'live',
+  scale: 'mcap',
+  query: '',
+  onCoin: false,
+  serverBlocked: false,
   side: 'buy',
   cur: 'USD',
   sellPercent: null,
@@ -141,7 +145,8 @@ function connectStream() {
     for (const t of d.tokens) S.tokens.set(t.address, { ...S.tokens.get(t.address), ...t });
     renderCoinList();
     renderTicker();
-    if (d.mode === 'live' && String(S.selected || '').startsWith('DEMO') && S.trending.length && S.view === 'trending') {
+    renderHomeSide();
+    if (d.mode === 'live' && String(S.selected || '').startsWith('DEMO') && S.trending.length && S.view === 'trending' && S.onCoin) {
       location.replace(`#coin/${S.trending[0]}`);
     }
   });
@@ -211,12 +216,15 @@ function renderAcct() {
   if (el.dataset.state !== 'user') {
     el.dataset.state = 'user';
     el.innerHTML = `
-      <button class="faucet-btn" id="hdrFunds" title="Add mock money to your wallet">＋ FUNDS</button>
-      <a class="bal-chip" href="#profile" style="text-decoration:none;color:inherit">
+      <button class="faucet-btn" id="hdrFunds" title="Add mock money to your wallet">＋ Funds</button>
+      <a class="bal-chip" href="#profile">
         <span class="v" id="hdrVal"></span><span class="p" id="hdrPnl"></span>
-      </a>`;
+      </a>
+      <a class="hdr-av" href="#profile" id="hdrAv" aria-label="Your profile"></a>`;
     $('#hdrFunds').addEventListener('click', () => openFunds());
   }
+  const avKey = `${u.photoUrl}|${u.avatar}|${u.color}`;
+  if ($('#hdrAv').dataset.key !== avKey) { $('#hdrAv').dataset.key = avKey; $('#hdrAv').innerHTML = avatarHtml(u, 'md'); }
   const v = $('#hdrVal');
   const nv = fmtUsd(u.value);
   if (v.textContent !== nv) { flashText(v, Math.sign(u.value - (+v.dataset.n || u.value))); v.textContent = nv; v.dataset.n = u.value; }
@@ -234,7 +242,7 @@ function updateFaucetButtons() {
   const big = $('#pfFaucet');
   if (big) {
     big.disabled = left > 0;
-    big.textContent = left > 0 ? `RECHARGING · ${fmtCountdown(left)}` : `💧 FREE DROP +${amt} SOL (≈ ${fmtUsd(usd)})`;
+    big.textContent = left > 0 ? `Recharging · ${fmtCountdown(left)}` : `💧 Free drop +${amt} SOL (≈ ${fmtUsd(usd)})`;
   }
 }
 const fmtCountdown = (ms) => { const s = Math.ceil(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
@@ -257,6 +265,7 @@ async function refreshMe() {
   if (S.user && S.user.solPrice) S.sol = S.sol || S.user.solPrice;
   mergeWatchlist();
   renderAcct();
+  renderHomeSide();
   renderPositions();
   updateBalances();
   updateEstimate();
@@ -284,110 +293,213 @@ function sortedTrending() {
 }
 function renderCoinList() {
   const rows = $('#coinRows');
-  const list = sortedTrending();
+  const q = (S.query || '').toLowerCase();
+  const list = sortedTrending().filter((t) => !q || `${t.symbol} ${t.name}`.toLowerCase().includes(q));
   $('#coinCount').textContent = `${list.length} coins`;
+  renderFeatured();
   const held = new Set((S.user?.positions || []).map((p) => p.address));
   const watched = watchedSet();
-  if (!list.length && S.sort === 'watch') {
-    rows.innerHTML = `<div class="tape-empty">${S.user ? 'Nothing on your watchlist yet. Open any coin and tap <b>☆ Watch</b> to track it here.' : '<button class="link-btn" data-auth="signup">Make an account</button> to keep a watchlist.'}</div>`;
+  if (!list.length) {
+    rows.innerHTML = `<div class="grid-empty">${S.sort === 'watch'
+      ? (S.user ? 'Nothing on your watchlist yet. Open any coin and tap <b>☆ Watch</b> to track it here.' : '<button class="link-btn" data-auth="signup">Make an account</button> to keep a watchlist.')
+      : q ? `No trending coin matches “${esc(S.query)}”. Paste a token address to open any Solana coin.` : 'Loading trending coins…'}</div>`;
     return;
   }
   rows.innerHTML = list.map((t, i) => `
-    <button class="coin-row" role="listitem" data-addr="${esc(t.address)}" aria-current="${t.address === S.selected}">
-      <span class="rank">${i + 1}</span>
-      ${coinImg(t)}
-      <span class="coin-main">
-        <span class="coin-sym">${esc(t.symbol)}${t.isPump ? '<span class="pump-tag" title="Launched on Pump.fun">PUMP</span>' : ''}${held.has(t.address) ? '<span class="held-dot">HELD</span>' : ''}${watched.has(t.address) ? '<span class="star-on" title="On your watchlist">★</span>' : ''}</span>
-        <span class="coin-sub">MC ${fmtUsd(t.marketCap, { compact: true })} · V ${fmtUsd(t.volume24h, { compact: true })}</span>
+    <button class="coin-card" role="listitem" data-addr="${esc(t.address)}">
+      <span class="cc-img">${coinImg(t, 'coin-img lg')}<span class="cc-rank">#${i + 1}</span></span>
+      <span class="cc-body">
+        <span class="cc-top"><b class="cc-name">${esc(t.name || t.symbol)}</b><span class="cc-tick">$${esc(t.symbol)}</span></span>
+        <span class="cc-mc">market cap: <b data-f="mc">${fmtUsd(t.marketCap, { compact: true })}</b></span>
+        <span class="cc-tags">${t.isPump ? '<span class="pump-tag">pump</span>' : ''}${held.has(t.address) ? '<span class="held-dot">held</span>' : ''}${watched.has(t.address) ? '<span class="star-on" title="On your watchlist">★</span>' : ''}<span class="muted">vol ${fmtUsd(t.volume24h, { compact: true })}</span></span>
       </span>
-      <span class="coin-right">
-        <span class="coin-price" data-f="price">${fmtPrice(t.priceUsd)}</span><br>
-        <span class="coin-chg ${cls(t.change24h)}" data-f="chg">${fmtPct(t.change24h, 1)}</span>
+      <span class="cc-right">
+        ${sparkSvg(t.spark, t.change24h)}
+        <span class="cc-price" data-f="price">${fmtPrice(t.priceUsd)}</span>
+        <span class="chg-pill ${cls(t.change24h)}" data-f="chg">${fmtPct(t.change24h, 1)}</span>
       </span>
-    </button>`).join('') || `<div class="tape-empty">Loading trending coins…</div>`;
+    </button>`).join('');
+}
+function sparkSvg(spark, chg, w = 84, h = 30) {
+  if (!spark || spark.length < 2) return `<svg class="spark" width="${w}" height="${h}" aria-hidden="true"></svg>`;
+  const lo = Math.min(...spark), hi = Math.max(...spark);
+  const pts = spark.map((v, i) => `${(i / (spark.length - 1) * w).toFixed(1)},${(h - 3 - (hi > lo ? (v - lo) / (hi - lo) : 0.5) * (h - 6)).toFixed(1)}`).join(' ');
+  const up = spark[spark.length - 1] >= spark[0];
+  return `<svg class="spark ${up ? 'up' : 'down'}" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+}
+function renderFeatured() {
+  const t = S.tokens.get(S.trending[0]);
+  const box = $('#featured');
+  if (!t) { box.innerHTML = '<div class="grid-empty">Finding the hottest coin…</div>'; return; }
+  const key = `${t.address}|${fmtUsd(t.marketCap, { compact: true })}|${(t.spark || []).length}`;
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = `
+    <button class="feat-inner" data-addr="${esc(t.address)}">
+      <span class="feat-label">🔥 Hottest right now</span>
+      <span class="feat-row">
+        ${coinImg(t, 'coin-img xl')}
+        <span class="feat-body">
+          <span class="feat-name">${esc(t.name || t.symbol)} <span class="cc-tick">$${esc(t.symbol)}</span>${t.isPump ? ' <span class="pump-tag">pump</span>' : ''}</span>
+          <span class="feat-mc">${fmtUsd(t.marketCap, { compact: true })} <small>market cap</small></span>
+          <span class="feat-stats"><span class="chg-pill ${cls(t.change24h)}">${fmtPct(t.change24h, 1)} 24h</span><span class="muted">vol ${fmtUsd(t.volume24h, { compact: true })}</span><span class="muted">liq ${fmtUsd(t.liquidity, { compact: true })}</span></span>
+        </span>
+        <span class="feat-spark">${sparkSvg(t.spark, t.change24h, 220, 70)}</span>
+      </span>
+      <span class="feat-cta">Trade now →</span>
+    </button>`;
+}
+function renderHomeSide() {
+  const box = $('#homeSide');
+  if (!box) return;
+  if (!S.user) {
+    box.innerHTML = `<div class="hs-title">Paper trade real memecoins</div>
+      <p class="muted">Live Solana prices. $1,000 of fake money to start. Zero risk.</p>
+      <button class="exec buy" data-auth="signup">Create free account</button>
+      <button class="link-btn" data-auth="login">I already have one</button>`;
+    return;
+  }
+  const u = S.user;
+  box.innerHTML = `<div class="hs-user">${avatarHtml(u, 'md')}<div><b>${esc(u.username)}</b><div class="muted small">${u.positions.length} open position${u.positions.length === 1 ? '' : 's'}</div></div></div>
+    <div class="hs-val">${fmtUsd(u.value)}</div>
+    <div class="${cls(u.profit)} hs-pnl">${fmtUsd(u.profit, { sign: true })} all-time</div>
+    <div class="hs-actions"><button class="btn-soft" id="hsFunds">＋ Add funds</button><a class="btn-ghost" href="#profile">My profile</a></div>`;
+  $('#hsFunds').addEventListener('click', () => openFunds());
 }
 function updateCoinRow(addr, dir) {
-  const row = $(`.coin-row[data-addr="${CSS.escape(addr)}"]`);
+  const row = $(`.coin-card[data-addr="${CSS.escape(addr)}"]`);
   if (!row) return;
   const t = S.tokens.get(addr);
-  const price = row.querySelector('[data-f="price"]');
-  price.textContent = fmtPrice(t.priceUsd);
+  row.querySelector('[data-f="price"]').textContent = fmtPrice(t.priceUsd);
+  row.querySelector('[data-f="mc"]').textContent = fmtUsd(t.marketCap, { compact: true });
   const chg = row.querySelector('[data-f="chg"]');
   chg.textContent = fmtPct(t.change24h, 1);
-  chg.className = `coin-chg ${cls(t.change24h)}`;
+  chg.className = `chg-pill ${cls(t.change24h)}`;
   flashEl(row, dir);
 }
 
 $('#coinRows').addEventListener('click', (e) => {
-  const row = e.target.closest('.coin-row');
+  const row = e.target.closest('.coin-card');
   if (row) location.hash = `coin/${row.dataset.addr}`;
+});
+$('#featured').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-addr]');
+  if (b) location.hash = `coin/${b.dataset.addr}`;
 });
 $$('.sort-chips .chip').forEach((b) => b.addEventListener('click', () => {
   S.sort = b.dataset.sort;
   $$('.sort-chips .chip').forEach((x) => x.setAttribute('aria-pressed', x === b));
   renderCoinList();
 }));
+// Search: typing filters the trending grid; pasting an address opens that coin.
+$('#caInput').addEventListener('input', () => {
+  const v = $('#caInput').value.trim();
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v)) return;
+  S.query = v;
+  if (S.view !== 'trending' || S.onCoin) location.hash = 'trending';
+  renderCoinList();
+});
 $('#caSearch').addEventListener('submit', (e) => {
   e.preventDefault();
   const v = $('#caInput').value.trim();
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v)) return toast('That doesn\'t look like a Solana token address.', 'err');
-  $('#caInput').value = '';
-  location.hash = `coin/${v}`;
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v)) { $('#caInput').value = ''; S.query = ''; location.hash = `coin/${v}`; return; }
+  const first = $('.coin-card');
+  if (first) { $('#caInput').value = ''; S.query = ''; location.hash = `coin/${first.dataset.addr}`; }
+  else toast('No coin matches that. Paste a Solana token address to open any coin.', 'err');
 });
 
-// ================= terminal =================
+// ================= coin page =================
 async function selectToken(addr) {
   const changed = S.selected !== addr;
   S.selected = addr;
+  S.onCoin = true;
   S.sellPercent = null;
-  $('#termEmpty').hidden = true;
-  $('#termBody').hidden = false;
-  $('#tradeLayout').classList.add('show-term');
-  $$('.coin-row').forEach((r) => r.setAttribute('aria-current', r.dataset.addr === addr));
+  $('#homeView').hidden = true;
+  $('#coinView').hidden = false;
 
   if (!S.tokens.get(addr)?.priceUsd) {
     try { const d = await api(`/api/token/${addr}`); S.tokens.set(addr, { ...S.tokens.get(addr), ...d.token }); }
     catch (e) { toast(esc(e.message), 'err'); location.hash = 'trending'; return; }
   }
-  renderTermHead();
   if (!chart) {
-    chart = new CandleChart($('#chartWrap'), { formatPrice: (p) => fmtPrice(p).replace('$', ''), onActivate: activateTrade });
+    chart = new CandleChart($('#chartWrap'), { formatPrice: (v) => chartFmt(v), onActivate: activateTrade });
+    chart.setMode(S.tf === 'live' ? 'line' : 'candles');
   }
+  renderTermHead();
   if (changed) {
     chart.setData([]);
+    chart.setPoints([]);
+    S.lastFeedPrice = null;
     $('#tapeRows').innerHTML = `<div class="tape-empty">Listening for on-chain trades…</div>`;
     S.tapeSeen = new Set();
     S.lastTapeAt = 0;
     connectStream();
     loadCandles();
     loadMyTokenTrades();
+    feedTick();
   }
+  applyChartScale();
   updateChartLines();
   renderPositions();
   updateBalances();
   updateEstimate();
-  if (S.user?.positions.some((p) => p.address === addr) && isDrawer() && !isMobile()) openPositions(true);
   window.scrollTo({ top: 0 });
+}
+
+// Market cap view: multiply price by circulating supply (market cap ÷ price).
+function supplyOf(t) { return t?.marketCap && t?.priceUsd ? t.marketCap / t.priceUsd : 0; }
+function chartFmt(v) { return S.scale === 'mcap' && chart?.mult > 1 ? fmtUsd(v, { compact: true }) : fmtPrice(v).replace('$', ''); }
+function applyChartScale() {
+  if (!chart) return;
+  const s = supplyOf(S.tokens.get(S.selected));
+  const mult = S.scale === 'mcap' && s ? s : 1;
+  if (Math.abs(mult / (chart.mult || 1) - 1) > 0.02) chart.setValueScale(mult);
 }
 
 async function loadCandles() {
   const addr = S.selected;
+  const tf = S.tf === 'live' ? 1 : S.tf;
   try {
-    let candles = await api(`/api/candles/${addr}?tf=${S.tf}`);
+    let candles = await api(`/api/candles/${addr}?tf=${tf}`);
     if (addr !== S.selected) return;
-    chart.setData(candles);
     if (candles.length < 60) {
-      const hist = await browserHistory(addr, S.tf).catch(() => []);
-      if (addr !== S.selected || !hist.length) return;
-      const firstLive = chart.data.length ? chart.data[0].time : Infinity;
-      chart.setData(hist.filter((c) => c.time < firstLive).concat(chart.data));
+      const hist = await browserHistory(addr, tf).catch(() => []);
+      if (addr !== S.selected) return;
+      const firstLive = candles.length ? candles[0].time : Infinity;
+      candles = hist.filter((c) => c.time < firstLive).concat(candles);
     }
-  } catch { /* stays empty until ticks arrive */ }
+    chart.setData(candles);
+    // seed the live line with recent history so it isn't empty
+    if (tf === 1 && chart.points.length < 5 && candles.length) {
+      const seed = candles.slice(-180).map((c) => ({ t: c.time * 1000 + 59_000, p: c.close }));
+      const live = chart.points.filter((p) => p.t > seed[seed.length - 1].t);
+      chart.setPoints(seed.concat(live));
+    }
+  } catch { /* fills in from live ticks */ }
 }
 async function loadMyTokenTrades() {
-  if (!S.user) { S.myTokenTrades = []; return; }
+  if (!S.user) { S.myTokenTrades = []; renderMyTrades(); return; }
   try { S.myTokenTrades = (await api('/api/me/trades?limit=200')).filter((t) => t.token === S.selected); } catch { S.myTokenTrades = []; }
+  renderMyTrades();
 }
+function renderMyTrades() {
+  chart?.setMarkers((S.myTokenTrades || []).map((t) => ({ t: t.ts, side: t.side })));
+  const box = $('#myTradesRows');
+  const list = S.myTokenTrades || [];
+  box.innerHTML = list.length ? list.map((t) => `<div class="tape-row">
+      <span class="side-tag ${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? 'Buy' : 'Sell'}</span>
+      <span class="muted">${fmtQty(t.qty)} @ ${fmtPrice(t.price)}</span>
+      <span class="usd r ${t.side === 'buy' ? 'up' : 'down'}">${fmtUsd(t.usd_value)}${t.side === 'sell' && t.pnl_usd != null ? ` <small class="${cls(t.pnl_usd)}">${fmtPct(t.pnl_pct, 0)}</small>` : ''}</span>
+      <span class="t r">${ago(t.ts)}</span></div>`).join('')
+    : `<div class="tape-empty">${S.user ? 'You haven\'t traded this coin yet.' : 'Log in to see your trades.'}</div>`;
+}
+$$('.ctab').forEach((b) => b.addEventListener('click', () => {
+  $$('.ctab').forEach((x) => x.setAttribute('aria-selected', x === b));
+  const mine = b.dataset.tape === 'mine';
+  $('#tapeRows').hidden = mine;
+  $('#myTradesRows').hidden = !mine;
+  if (mine) renderMyTrades();
+}));
 
 function renderTermHead() {
   const t = S.tokens.get(S.selected);
@@ -395,32 +507,56 @@ function renderTermHead() {
   const img = $('#tokImg');
   if (t.image) { img.src = t.image; img.style.display = ''; img.referrerPolicy = 'no-referrer'; img.onerror = () => { img.style.display = 'none'; }; }
   else img.style.display = 'none';
-  $('#tokSym').textContent = '$' + (t.symbol || '?');
+  $('#tokSym').textContent = t.name || t.symbol || '?';
+  $('#tokName').textContent = '$' + (t.symbol || '?');
   const isDemo = String(t.address).startsWith('DEMO');
-  $('#tokName').innerHTML = `${esc(t.name || '')}${t.isPump ? ' <span class="pump-tag">PUMP.FUN</span>' : ''}${isDemo ? '' : `
-    <span class="ext-links">${t.isPump ? `<a href="https://pump.fun/coin/${encodeURIComponent(t.address)}" target="_blank" rel="noopener">pump.fun ↗</a>` : ''}<a href="https://dexscreener.com/solana/${encodeURIComponent(t.pairAddress || t.address)}" target="_blank" rel="noopener">dexscreener ↗</a></span>`}`;
-  $('#tokPrice').textContent = fmtPrice(t.priceUsd);
-  $('#tokChg').innerHTML = [['5m', t.change5m], ['1h', t.change1h], ['24h', t.change24h]]
-    .map(([k, v]) => `<span class="${cls(v)}">${k} ${fmtPct(v, 1)}</span>`).join('');
-  const age = t.createdAt ? ago(t.createdAt) : '—';
-  $('#statStrip').innerHTML = [
-    ['Mkt Cap', fmtUsd(t.marketCap, { compact: true })], ['Liquidity', fmtUsd(t.liquidity, { compact: true })],
-    ['24h Vol', fmtUsd(t.volume24h, { compact: true })],
-    ['5m Txns', t.buys5m != null ? `<span class="up">${t.buys5m}B</span> / <span class="down">${t.sells5m}S</span>` : '—'],
-    ['Age', age],
-  ].map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
-  document.title = `${t.symbol} ${fmtPrice(t.priceUsd)} · MemeSim`;
+  const metaKey = `${t.address}|${t.isPump}|${t.pairAddress}`;
+  if ($('#tokMeta').dataset.key !== metaKey) {
+    $('#tokMeta').dataset.key = metaKey;
+    $('#tokMeta').innerHTML = `${isDemo ? '<span class="pump-tag demo">demo coin</span>' : `<button class="addr-chip" data-copy="${esc(t.address)}" title="Copy token address">${esc(t.address.slice(0, 4))}…${esc(t.address.slice(-4))} ⧉</button>`}
+      ${t.isPump ? '<span class="pump-tag">pump.fun</span>' : ''}
+      ${isDemo ? '' : `<span class="ext-links">${t.isPump ? `<a href="https://pump.fun/coin/${encodeURIComponent(t.address)}" target="_blank" rel="noopener">pump.fun ↗</a>` : ''}<a href="https://dexscreener.com/solana/${encodeURIComponent(t.pairAddress || t.address)}" target="_blank" rel="noopener">dexscreener ↗</a></span>`}`;
+  }
+  setFlash($('#tokMcap'), fmtUsd(t.marketCap, { compact: true }), t.marketCap);
+  setFlash($('#tokPrice'), fmtPrice(t.priceUsd), t.priceUsd);
+  $('#tokVol').textContent = fmtUsd(t.volume24h, { compact: true });
+  const chg = $('#tokChg');
+  chg.textContent = fmtPct(t.change24h, 1);
+  chg.className = `v ${cls(t.change24h)}`;
+  const b = t.buys5m, s = t.sells5m;
+  const tot = (b || 0) + (s || 0);
+  $('#statStrip').innerHTML = `
+    <div class="st-grid">
+      ${[['5m', t.change5m], ['1h', t.change1h], ['24h', t.change24h]].map(([k, v]) => `<div class="st"><span class="k">${k} change</span><span class="v ${cls(v)}">${fmtPct(v, 1)}</span></div>`).join('')}
+      <div class="st"><span class="k">Liquidity</span><span class="v">${fmtUsd(t.liquidity, { compact: true })}</span></div>
+      <div class="st"><span class="k">Age</span><span class="v">${t.createdAt ? ago(t.createdAt) : '—'}</span></div>
+    </div>
+    <div class="bs">
+      <div class="bs-row"><span class="up">${b ?? '—'} buys</span><span class="muted">last 5 minutes</span><span class="down">${s ?? '—'} sells</span></div>
+      <div class="bs-bar"><span class="bs-buy" style="width:${tot ? (b / tot) * 100 : 50}%"></span><span class="bs-sell" style="width:${tot ? (s / tot) * 100 : 50}%"></span></div>
+    </div>`;
+  document.title = `${t.symbol} ${fmtUsd(t.marketCap, { compact: true })} · MemeSim`;
   updateWatchBtn();
 }
+function setFlash(el, text, n) {
+  if (el.textContent === text) return;
+  const prev = Number(el.dataset.n);
+  el.textContent = text;
+  if (Number.isFinite(prev) && n !== prev) flashText(el, Math.sign(n - prev));
+  el.dataset.n = n;
+}
+document.addEventListener('click', async (e) => {
+  const c = e.target.closest('[data-copy]');
+  if (!c) return;
+  try { await navigator.clipboard.writeText(c.dataset.copy); toast('Address copied', 'info', 1500); } catch { toast(esc(c.dataset.copy), 'info', 6000); }
+});
 
 function onSelectedTick(t, dir) {
-  const el = $('#tokPrice');
-  el.textContent = fmtPrice(t.priceUsd);
-  el.className = `tok-price ${dir > 0 ? 'up' : dir < 0 ? 'down' : ''}`;
-  flashText(el, dir);
   renderTermHead();
-  // roll the live candle forward
-  if (chart && t.priceUsd) {
+  applyChartScale();
+  if (!chart || !t.priceUsd) return;
+  chart.pushPoint(Date.now(), t.priceUsd);
+  if (S.tf !== 'live') {
     const step = S.tf * 60;
     const bucket = Math.floor(Date.now() / 1000 / step) * step;
     const last = chart.data[chart.data.length - 1];
@@ -432,15 +568,65 @@ function onSelectedTick(t, dir) {
 function updateChartLines() {
   if (!chart) return;
   const p = S.user?.positions.find((x) => x.address === S.selected);
-  chart.setLines(p ? [{ price: p.avgEntry, label: 'AVG ENTRY', color: '#00e5ff' }] : []);
+  chart.setLines(p ? [{ price: p.avgEntry, label: 'Your entry', color: '#7dd3fc' }] : []);
 }
 
 $$('.tf').forEach((b) => b.addEventListener('click', () => {
-  S.tf = Number(b.dataset.tf);
+  S.tf = b.dataset.tf === 'live' ? 'live' : Number(b.dataset.tf);
   $$('.tf').forEach((x) => x.setAttribute('aria-pressed', x === b));
+  chart?.setMode(S.tf === 'live' ? 'line' : 'candles');
+  $('#chartHint').textContent = S.tf === 'live' ? 'updates every second · drag · zoom · tap to trade' : 'drag · zoom · tap to trade';
   loadCandles();
 }));
+$$('.scale').forEach((b) => b.addEventListener('click', () => {
+  S.scale = b.dataset.scale;
+  $$('.scale').forEach((x) => x.setAttribute('aria-pressed', x === b));
+  if (chart) chart.setValueScale(1);
+  applyChartScale();
+}));
 $('#resetView').addEventListener('click', () => chart?.resetView());
+
+// ---- 1-second live feed for the open coin ----
+// Reads the coin's live pair straight from DexScreener every second (from this browser), moves the chart,
+// and, while the server is being rate-limited, hands the price to the server so trades use it too.
+let feedBusy = false;
+async function feedTick() {
+  const addr = S.selected;
+  if (feedBusy || document.hidden || !S.onCoin || !addr || String(addr).startsWith('DEMO')) return;
+  feedBusy = true;
+  try {
+    const t = S.tokens.get(addr);
+    let pair = null;
+    if (t?.pairAddress) {
+      const j = await getJ(`${DEX}/latest/dex/pairs/solana/${t.pairAddress}`);
+      pair = j?.pairs?.[0] || j?.pair || null;
+    }
+    if (!pair) {
+      const arr = await getJ(`${DEX}/tokens/v1/solana/${addr}`);
+      pair = (Array.isArray(arr) ? arr : []).filter((p) => p?.baseToken?.address === addr).sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
+    }
+    if (!pair || addr !== S.selected) return;
+    const price = Number(pair.priceUsd);
+    if (!(price > 0)) return;
+    const prev = S.tokens.get(addr) || {};
+    const next = {
+      ...prev, priceUsd: price, change5m: pair.priceChange?.m5 ?? prev.change5m, change1h: pair.priceChange?.h1 ?? prev.change1h,
+      change24h: pair.priceChange?.h24 ?? prev.change24h, volume24h: pair.volume?.h24 ?? prev.volume24h, liquidity: pair.liquidity?.usd ?? prev.liquidity,
+      marketCap: pair.marketCap || pair.fdv || prev.marketCap, buys5m: pair.txns?.m5?.buys ?? prev.buys5m, sells5m: pair.txns?.m5?.sells ?? prev.sells5m,
+      pairAddress: prev.pairAddress || pair.pairAddress,
+    };
+    const dir = prev.priceUsd ? Math.sign(price - prev.priceUsd) : 0;
+    S.tokens.set(addr, next);
+    onSelectedTick(next, dir);
+    updateCoinRow(addr, dir);
+    if (S.user) {
+      const p = S.user.positions.find((x) => x.address === addr);
+      if (p) { p.price = price; p.value = p.qty * price; p.pnlUsd = p.value - p.costUsd; p.pnlPct = p.costUsd > 0 ? (p.value / p.costUsd - 1) * 100 : 0; recomputeAccount(); renderAcct(); renderPositions(); updateEstimate(); }
+    }
+    if (S.serverBlocked) api('/api/relay', { pairs: [slimPair(pair)] }).catch(() => {});
+  } catch { /* busy; next second */ } finally { feedBusy = false; }
+}
+setInterval(feedTick, 1000);
 
 function updateWatchBtn() {
   const b = $('#watchBtn');
@@ -477,7 +663,7 @@ function addTape(trades, fresh) {
   const html = trades.slice().reverse().map((t) => {
     const big = t.usd >= 1000;
     return `<div class="tape-row ${big ? 'big' : ''} ${fresh ? 'fresh-' + t.side : ''}">
-      <span class="side-tag ${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? 'BUY' : 'SELL'}</span>
+      <span class="side-tag ${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? 'Buy' : 'Sell'}</span>
       <span class="muted">${esc(t.wallet || '')}</span>
       <span class="usd ${t.side === 'buy' ? 'up' : 'down'}">${fmtUsd(t.usd, { compact: true })}</span>
       <span class="t" data-ts="${t.ts}">${ago(t.ts)}</span>
@@ -520,7 +706,7 @@ function setSide(side) {
   tradeBox.classList.toggle('sell-mode', side === 'sell');
   const exec = $('#execBtn');
   exec.className = `exec ${side}`;
-  exec.textContent = side === 'buy' ? 'BUY' : 'SELL';
+  exec.textContent = side === 'buy' ? 'Buy' : 'Sell';
   $('#amountLabel').textContent = side === 'buy' ? 'Amount to spend' : `Amount to sell (paid out in ${S.cur})`;
   amountInput.value = '';
   renderQuick();
@@ -581,7 +767,7 @@ $('#execBtn').addEventListener('click', executeTrade);
 
 // Terminal keyboard: digits jump into the amount box, B / S switch side.
 document.addEventListener('keydown', (e) => {
-  if (S.view !== 'trending' || !S.selected || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (S.view !== 'trending' || !S.onCoin || !S.selected || e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || !$('#authModal').hidden) return;
   if (/^[0-9.]$/.test(e.key)) { activateTrade(); amountInput.value = (S.sellPercent != null ? '' : amountInput.value) + e.key; S.sellPercent = null; updateEstimate(); e.preventDefault(); }
@@ -601,6 +787,8 @@ function updateEstimate() {
   const est = $('#tradeEst');
   if (!est) return;
   const t = S.tokens.get(S.selected);
+  const execLabel = `${S.side === 'buy' ? 'Buy' : 'Sell'}${t?.symbol ? ' $' + t.symbol : ''}`;
+  if ($('#execBtn').textContent !== execLabel) $('#execBtn').textContent = execLabel;
   updateBalances();
   if (!t?.priceUsd) { est.textContent = ''; return; }
   const amt = Number(amountInput.value);
@@ -639,8 +827,8 @@ async function executeTrade() {
     const r = await api('/api/trade', body);
     S.user = r.user;
     const t = r.trade;
-    if (t.side === 'buy') toast(`<b>BOUGHT</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="muted">@ ${fmtPrice(t.price)}</span>`);
-    else toast(`<b>SOLD</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="${cls(t.pnlUsd)}">${fmtUsd(t.pnlUsd, { sign: true })} (${fmtPct(t.pnlPct, 1)})</span>`, t.pnlUsd < 0 ? 'err' : '');
+    if (t.side === 'buy') toast(`<b>Bought</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="muted">@ ${fmtPrice(t.price)}</span>`);
+    else toast(`<b>Sold</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="${cls(t.pnlUsd)}">${fmtUsd(t.pnlUsd, { sign: true })} (${fmtPct(t.pnlPct, 1)})</span>`, t.pnlUsd < 0 ? 'err' : '');
     amountInput.value = '';
     S.sellPercent = null;
     closeSheet();
@@ -667,7 +855,7 @@ function renderPositions() {
   const ps = S.user.positions.slice().sort((a, b) => (b.address === S.selected) - (a.address === S.selected) || b.value - a.value);
   const tv = ps.reduce((s, p) => s + p.value, 0), tp = ps.reduce((s, p) => s + p.pnlUsd, 0), tc = ps.reduce((s, p) => s + p.costUsd, 0);
   $('#posCount').textContent = ps.length;
-  $('#posTotal').innerHTML = `<div class="k">TOTAL POSITION VALUE</div><div class="v">${fmtUsd(tv)}</div>
+  $('#posTotal').innerHTML = `<div class="k">Total value</div><div class="v">${fmtUsd(tv)}</div>
     <div class="${cls(tp)}" style="font-weight:800">${fmtUsd(tp, { sign: true })} (${fmtPct(tc ? (tp / tc) * 100 : 0)}) unrealized</div>`;
 
   const cur = ps.find((p) => p.address === S.selected);
@@ -675,12 +863,12 @@ function renderPositions() {
   handle.classList.toggle('has-down', !!cur && cur.pnlUsd < 0);
   if (cur) {
     strip.hidden = false;
-    strip.innerHTML = `<span class="lbl">YOUR POSITION</span><span>${fmtQty(cur.qty)} · avg ${fmtPrice(cur.avgEntry)}</span>
+    strip.innerHTML = `<span class="lbl">Your position</span><span>${fmtQty(cur.qty)} · avg ${fmtPrice(cur.avgEntry)}</span>
       <span class="pnl ${cls(cur.pnlUsd)}">${fmtUsd(cur.pnlUsd, { sign: true })} ${fmtPct(cur.pnlPct, 1)}</span>`;
   } else strip.hidden = true;
 
   if (!ps.length) {
-    list.innerHTML = `<div class="pos-empty">No open positions.<br>Pick a coin and hit <span class="up">BUY</span> — your trades show up here live.</div>`;
+    list.innerHTML = `<div class="pos-empty">No open positions.<br>Open a coin and hit <span class="up">Buy</span>. Your positions show up here live.</div>`;
     return;
   }
   // keep DOM nodes stable so the flash animations look right
@@ -697,7 +885,7 @@ function renderPositions() {
           <span class="k">Value</span><span class="v" data-f="val"></span>
         </div>
         <div class="pnl-big" data-f="pnl"><span data-f="pnlUsd"></span><span data-f="pnlPct"></span></div>
-        <div class="quick-sell"><button data-qs="50">SELL 50%</button><button data-qs="100">SELL ALL</button></div>
+        <div class="quick-sell"><button data-qs="50">Sell 50%</button><button data-qs="100">Sell all</button></div>
       </div>`).join('');
   }
   for (const p of ps) {
@@ -731,7 +919,7 @@ $('#posList').addEventListener('click', async (e) => {
       const r = await api('/api/trade', { address: card.dataset.addr, side: 'sell', percent: Number(qs.dataset.qs), currency: 'USD' });
       S.user = r.user;
       const t = r.trade;
-      toast(`<b>SOLD</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="${cls(t.pnlUsd)}">${fmtUsd(t.pnlUsd, { sign: true })} (${fmtPct(t.pnlPct, 1)})</span>`, t.pnlUsd < 0 ? 'err' : '');
+      toast(`<b>Sold</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="${cls(t.pnlUsd)}">${fmtUsd(t.pnlUsd, { sign: true })} (${fmtPct(t.pnlPct, 1)})</span>`, t.pnlUsd < 0 ? 'err' : '');
       renderAcct(); renderPositions(); updateChartLines(); renderCoinList(); updateEstimate();
     } catch (err) { toast(esc(err.message), 'err'); qs.disabled = false; }
     return;
@@ -777,6 +965,7 @@ async function relayTick() {
   relayBusy = true;
   try {
     const plan = await api('/api/relay/plan');
+    S.serverBlocked = !!plan.serverBlocked;
     if (!plan.want) return;
     const body = {};
     let addrs = plan.addresses || [];
@@ -850,10 +1039,10 @@ function renderTicker(fresh) {
   const items = [];
   for (const f of S.feed.slice(0, 14)) {
     const buy = f.side === 'buy';
-    items.push(`<span class="tk"><span class="who">${esc(f.username)}</span><b class="${buy ? 'up' : 'down'}">${buy ? 'BOUGHT' : 'SOLD'}</b>${fmtUsd(f.usd_value, { compact: true })} <b>${esc(f.symbol)}</b>${!buy && f.pnl_pct != null ? `<span class="${cls(f.pnl_pct)}">${fmtPct(f.pnl_pct, 0)}</span>` : ''}</span>`);
+    items.push(`<span class="tk ${buy ? 'tk-buy' : 'tk-sell'}"><b>${esc(f.username)}</b> ${buy ? 'bought' : 'sold'} ${fmtUsd(f.usd_value, { compact: true })} of <b>${esc(f.symbol)}</b>${!buy && f.pnl_pct != null ? ` <span class="${cls(f.pnl_pct)}">${fmtPct(f.pnl_pct, 0)}</span>` : ''}</span>`);
   }
-  for (const t of sortedTrending().slice(0, 12)) {
-    items.push(`<span class="tk"><b>${esc(t.symbol)}</b>${fmtPrice(t.priceUsd)}<span class="${cls(t.change5m)}">${fmtPct(t.change5m, 1)} 5m</span></span>`);
+  for (const t of S.trending.map((a) => S.tokens.get(a)).filter(Boolean).slice(0, 12)) {
+    items.push(`<a class="tk" href="#coin/${esc(t.address)}">${coinImg(t, 'coin-img xs')}<b>${esc(t.symbol)}</b> ${fmtUsd(t.marketCap, { compact: true })} <span class="${cls(t.change5m)}">${fmtPct(t.change5m, 1)}</span></a>`);
   }
   if (!items.length) return;
   const inner = $('#ticker');
@@ -922,7 +1111,7 @@ addEventListener('scroll', () => { tip.hidden = true; }, { passive: true });
 async function onBadge({ badge, detail }) {
   const d = S.badgeDefs[badge];
   if (!d) return;
-  const t = toast(`<span class="bi">${d.icon}</span><b>BADGE UNLOCKED · ${esc(d.name.toUpperCase())}</b><br><span class="muted">${esc(detail || d.how)}</span>`, 'badge-toast', 6000);
+  const t = toast(`<span class="bi">${d.icon}</span><b>Badge unlocked: ${esc(d.name)}</b><br><span class="muted">${esc(detail || d.how)}</span>`, 'badge-toast', 6000);
   t.style.setProperty('--bc', d.color);
   await refreshMe();
   const card = $(`.ach[data-badge="${badge}"]`);
@@ -933,9 +1122,9 @@ async function onBadge({ badge, detail }) {
 async function renderProfile() {
   const root = $('#profile');
   if (!S.user) {
-    root.innerHTML = `<div class="guest panel"><div class="big-glyph">◉</div><h2>PAPER TRADE REAL MEMECOINS</h2>
+    root.innerHTML = `<div class="guest card"><div class="big-glyph">◉</div><h2>Paper trade real memecoins</h2>
       <p class="muted">Start with $1,000 in mock USD. Real live prices. Zero real money.</p>
-      <button class="exec buy" style="max-width:280px;width:100%" data-auth="signup">CREATE FREE ACCOUNT</button>
+      <button class="exec buy" style="max-width:280px;width:100%" data-auth="signup">Create free account</button>
       <p><button class="link-btn" data-auth="login">I already have one</button></p></div>`;
     return;
   }
@@ -944,7 +1133,7 @@ async function renderProfile() {
     root.dataset.built = '1';
     root.dataset.uid = u.id;
     root.innerHTML = `
-      <div class="pf-hero panel pf-card">
+      <div class="pf-hero card pf-card">
         <div id="pfAvatar"></div>
         <div class="pf-who">
           <div class="pf-name"><span>${esc(u.username)}</span><span id="pfBadges"></span></div>
@@ -957,32 +1146,32 @@ async function renderProfile() {
           <button class="btn-ghost" id="logoutBtn">Log out</button>
         </div>
       </div>
-      <div class="pf-stats panel" id="pfStats"></div>
-      <div class="pf-cal panel pf-card">
-        <div class="sec-title"><h3>// DAILY PnL CALENDAR</h3>
+      <div class="pf-stats card" id="pfStats"></div>
+      <div class="pf-cal card pf-card">
+        <div class="sec-title"><h3>Daily PnL</h3>
           <div class="cal-nav"><button class="btn-ghost small" id="calPrev" aria-label="Previous month">‹</button><span class="m" id="calMonth"></span><button class="btn-ghost small" id="calNext" aria-label="Next month">›</button></div>
         </div>
         <div class="cal-grid" id="calGrid"></div>
         <div class="cal-foot" id="calFoot"></div>
       </div>
-      <div class="pf-faucet panel pf-card">
-        <div class="sec-title"><h3>// VIRTUAL WALLET</h3></div>
+      <div class="pf-faucet card pf-card">
+        <div class="sec-title"><h3>Wallet</h3></div>
         <div id="walletLines"></div>
-        <button class="exec buy" id="pfAddFunds" type="button">＋ ADD FUNDS</button>
+        <button class="exec buy" id="pfAddFunds" type="button">＋ Add funds</button>
         <button class="faucet-big" id="pfFaucet"></button>
         <p class="note">Add any amount of mock USD or SOL, as often as you like. Money you add is never counted as profit on the leaderboard. Only your trading is.</p>
         <div class="dep-list" id="depositList"></div>
       </div>
-      <div class="pf-mycoins panel pf-card">
-        <div class="sec-title"><h3>// MY COINS</h3><span class="muted" id="myCoinsCount"></span></div>
+      <div class="pf-mycoins card pf-card">
+        <div class="sec-title"><h3>My coins</h3><span class="muted" id="myCoinsCount"></span></div>
         <div style="overflow-x:auto"><table class="trades-table mycoins" id="myCoins"></table></div>
       </div>
-      <div class="pf-ach panel pf-card">
-        <div class="sec-title"><h3>// ACHIEVEMENT SHOWCASE</h3><span class="muted" id="achCount"></span></div>
+      <div class="pf-ach card pf-card">
+        <div class="sec-title"><h3>Achievements</h3><span class="muted" id="achCount"></span></div>
         <div class="ach-grid" id="achGrid"></div>
       </div>
-      <div class="pf-trades panel pf-card">
-        <div class="sec-title"><h3>// RECENT TRADES</h3></div>
+      <div class="pf-trades card pf-card">
+        <div class="sec-title"><h3>Recent trades</h3></div>
         <div style="overflow-x:auto"><table class="trades-table" id="tradesTable"></table></div>
       </div>`;
     $('#logoutBtn').addEventListener('click', logout);
@@ -1023,7 +1212,7 @@ function renderProfileLive() {
   $('#pfBio').textContent = u.bio || 'No bio yet. Tap Edit profile to add one.';
   $('#pfBio').classList.toggle('muted', !u.bio);
   renderMyCoins();
-  $('#depositList').innerHTML = (u.deposits || []).length ? `<div class="k">RECENT TOP-UPS</div>${u.deposits.slice(0, 6).map((d) =>
+  $('#depositList').innerHTML = (u.deposits || []).length ? `<div class="k">Recent top-ups</div>${u.deposits.slice(0, 6).map((d) =>
     `<div class="wallet-line"><span class="muted">${new Date(d.ts).toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${d.currency === 'SOL' ? fmtSol(d.amount) : fmtUsd(d.amount)}</span><b>+${fmtUsd(d.usdValue)}</b></div>`).join('')}` : '';
   const allTimePct = u.netDeposits > 0 ? (u.profit / u.netDeposits) * 100 : 0;
   $('#pfStats').innerHTML = [
@@ -1047,9 +1236,9 @@ function renderProfileLive() {
     grid.innerHTML = Object.entries(S.badgeDefs).map(([id, d]) => {
       const e = earned.get(id);
       return `<div class="ach ${e ? 'on' : ''}" data-badge="${id}" style="--bc:${d.color}">
-        ${e ? '' : '<span class="lock">🔒 LOCKED</span>'}
+        ${e ? '' : '<span class="lock">🔒 Locked</span>'}
         <div class="ico">${d.icon}</div><div class="nm">${esc(d.name)}</div><div class="how">${esc(d.how)}</div>
-        <div class="when">${e ? `UNLOCKED ${new Date(e.earnedAt).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}${e.detail ? `<br><span class="muted">${esc(e.detail)}</span>` : ''}` : 'NOT YET EARNED'}</div>
+        <div class="when">${e ? `Unlocked ${new Date(e.earnedAt).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}${e.detail ? `<br><span class="muted">${esc(e.detail)}</span>` : ''}` : 'Not earned yet'}</div>
       </div>`;
     }).join('');
   }
@@ -1130,6 +1319,7 @@ setInterval(() => { if (S.view === 'profile' && S.user) loadProfileData(); }, 12
 
 // ================= avatars =================
 function avatarHtml(u, size = '') {
+  if (u?.photoUrl) return `<img class="av photo ${size}" src="${esc(u.photoUrl)}" alt="" loading="lazy">`;
   const color = u?.color || `hsl(${hue(u?.username)} 90% 60%)`;
   const inner = u?.avatar ? esc(u.avatar) : esc(String(u?.username || '?')[0].toUpperCase());
   return `<span class="av ${size} ${u?.avatar ? 'emoji' : ''}" style="--avc:${esc(color)}">${inner}</span>`;
@@ -1221,9 +1411,11 @@ $('#fundsForm').addEventListener('submit', async (e) => {
 
 // ---- edit profile ----
 let peAvatar = null, peColor = null;
+let pePhoto; // undefined = keep current, null = remove, string = new picture (data URL)
 async function openProfileEdit() {
   if (!S.options) { try { S.options = await api('/api/options'); } catch (e) { return toast(esc(e.message), 'err'); } }
-  peAvatar = S.user.avatar; peColor = S.user.color;
+  peAvatar = S.user.avatar; peColor = S.user.color; pePhoto = undefined;
+  $('#pePhotoInput').value = '';
   $('#peBio').value = S.user.bio || '';
   $('#peErr').textContent = '';
   renderProfileEditor();
@@ -1235,9 +1427,37 @@ function renderProfileEditor() {
     + o.avatars.map((a) => `<button type="button" role="radio" aria-checked="${peAvatar === a}" data-av="${a}">${a}</button>`).join('');
   $('#peColors').innerHTML = o.colors.map((c) => `<button type="button" role="radio" aria-checked="${peColor === c}" aria-label="Color ${c}" data-col="${c}" style="--sw:${c}"></button>`).join('');
   $('#peCount').textContent = `${$('#peBio').value.length}/140`;
-  $('#pePreview').innerHTML = `${avatarHtml({ ...S.user, avatar: peAvatar, color: peColor }, 'xl')}<div><b>${esc(S.user.username)}</b><div class="muted">${esc($('#peBio').value) || 'Your bio shows here'}</div></div>`;
+  const photoUrl = pePhoto === undefined ? S.user.photoUrl : pePhoto;
+  $('#pePhotoRemove').hidden = !photoUrl;
+  $('#pePreview').innerHTML = `${avatarHtml({ ...S.user, avatar: peAvatar, color: peColor, photoUrl }, 'xl')}<div><b>${esc(S.user.username)}</b><div class="muted">${esc($('#peBio').value) || 'Your bio shows here'}</div></div>`;
 }
-$('#peAvatars').addEventListener('click', (e) => { const b = e.target.closest('[data-av]'); if (b) { peAvatar = b.dataset.av || null; renderProfileEditor(); } });
+$('#peAvatars').addEventListener('click', (e) => { const b = e.target.closest('[data-av]'); if (b) { peAvatar = b.dataset.av || null; pePhoto = null; renderProfileEditor(); } });
+$('#pePhotoRemove').addEventListener('click', () => { pePhoto = null; renderProfileEditor(); });
+$('#pePhotoInput').addEventListener('change', async () => {
+  const file = $('#pePhotoInput').files[0];
+  if (!file) return;
+  $('#peErr').textContent = '';
+  if (!/^image\//.test(file.type)) { $('#peErr').textContent = 'Pick an image file (JPG, PNG or WebP).'; return; }
+  if (file.size > 15e6) { $('#peErr').textContent = 'That image is over 15 MB. Pick a smaller one.'; return; }
+  try { pePhoto = await squarePhoto(file, 192); renderProfileEditor(); }
+  catch { $('#peErr').textContent = "Couldn't read that image. Try a different one."; }
+});
+// Crop to the centre square and shrink to size×size, so uploads stay tiny.
+async function squarePhoto(file, size) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = size;
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+    let out = cv.toDataURL('image/webp', 0.86);
+    if (!out.startsWith('data:image/webp')) out = cv.toDataURL('image/jpeg', 0.86);
+    return out;
+  } finally { URL.revokeObjectURL(url); }
+}
 $('#peColors').addEventListener('click', (e) => { const b = e.target.closest('[data-col]'); if (b) { peColor = b.dataset.col; renderProfileEditor(); } });
 $('#peBio').addEventListener('input', renderProfileEditor);
 $('#profileForm').addEventListener('submit', async (e) => {
@@ -1245,11 +1465,14 @@ $('#profileForm').addEventListener('submit', async (e) => {
   const btn = $('#peSave');
   btn.disabled = true;
   try {
-    const r = await api('/api/profile', { avatar: peAvatar, color: peColor, bio: $('#peBio').value });
+    const body = { avatar: peAvatar, color: peColor, bio: $('#peBio').value };
+    if (pePhoto !== undefined) body.photo = pePhoto;
+    const r = await api('/api/profile', body);
     S.user = r.user;
     closeModal($('#profileModal'));
     renderProfileLive();
-    toast('<b>PROFILE SAVED</b>', 'info', 2000);
+    renderAcct(); renderHomeSide();
+    toast('<b>Profile saved</b>', 'info', 2000);
   } catch (err) { $('#peErr').textContent = err.message; }
   finally { btn.disabled = false; }
 });
@@ -1274,9 +1497,9 @@ async function openPlayer(username) {
         <div><div class="k">Win rate</div><div class="v">${p.winRate == null ? '—' : Math.round(p.winRate) + '%'}</div></div>
         <div><div class="k">Best trade</div><div class="v ${cls(p.bestTradePct)}">${p.bestTradePct == null ? '—' : fmtPct(p.bestTradePct, 0)}</div></div>
       </div>
-      <div class="k pp-sub">OPEN POSITIONS</div>
+      <div class="k pp-sub">Open positions</div>
       ${p.positions.length ? p.positions.map((x) => `<a class="pp-pos" href="#coin/${esc(x.address)}" data-close>${coinImg(x)}<b>${esc(x.symbol)}</b><span>${fmtUsd(x.value)}</span><span class="${cls(x.pnlPct)}">${fmtPct(x.pnlPct, 1)}</span></a>`).join('') : '<div class="muted">None right now.</div>'}
-      <div class="k pp-sub">RECENT TRADES</div>
+      <div class="k pp-sub">Recent trades</div>
       ${p.recentTrades.length ? p.recentTrades.map((t) => `<div class="pp-trade"><span class="${t.side === 'buy' ? 'up' : 'down'}">${t.side.toUpperCase()}</span><span>${esc(t.symbol)}</span><span>${fmtUsd(t.usdValue, { compact: true })}</span><span class="${cls(t.pnlPct)}">${t.side === 'sell' && t.pnlPct != null ? fmtPct(t.pnlPct, 0) : ''}</span><span class="muted">${ago(t.ts)} ago</span></div>`).join('') : '<div class="muted">No trades yet.</div>'}`;
   } catch (e) { card.innerHTML = `<button type="button" class="modal-x" data-close aria-label="Close">✕</button><div class="tape-empty">${esc(e.message)}</div>`; }
 }
@@ -1286,11 +1509,11 @@ let authMode = 'signup';
 function openAuth(mode = 'signup') {
   authMode = mode;
   const signup = mode === 'signup';
-  $('#authTitle').textContent = signup ? 'CREATE ACCOUNT' : 'WELCOME BACK';
+  $('#authTitle').textContent = signup ? 'Create account' : 'Welcome back';
   $('#authSub').innerHTML = signup ? 'Get <b class="up">$1,000 mock USD</b> to trade real trending memecoins. No real money, ever.' : 'Log in to keep trading.';
   $('#userField').hidden = !signup;
   $('#authForm').password.autocomplete = signup ? 'new-password' : 'current-password';
-  $('#authSubmit').textContent = signup ? 'START TRADING' : 'LOG IN';
+  $('#authSubmit').textContent = signup ? 'Start trading' : 'Log in';
   $('#authSwitch').textContent = signup ? 'Already have an account? Log in' : 'New here? Create an account';
   $('#authErr').textContent = '';
   $('#authModal').hidden = false;
@@ -1313,7 +1536,7 @@ $('#authForm').addEventListener('submit', async (e) => {
     f.reset();
     closeAuth();
     await refreshMe();
-    toast(authMode === 'signup' ? `<b>WALLET FUNDED</b> · $1,000 mock USD is ready. Go get that bag 🚀` : `<b>LOGGED IN</b> · welcome back, ${esc(S.user.username)}`);
+    toast(authMode === 'signup' ? `<b>Wallet funded</b> · $1,000 mock USD is ready. Go get that bag 🚀` : `<b>Logged in</b> · welcome back, ${esc(S.user.username)}`);
     if (S.selected) loadMyTokenTrades();
   } catch (err) { $('#authErr').textContent = err.message; }
   finally { btn.disabled = false; }
@@ -1335,9 +1558,13 @@ function route() {
   const h = location.hash.replace(/^#/, '') || 'trending';
   let view = h;
   if (h.startsWith('coin/')) { view = 'trending'; selectToken(h.slice(5)); }
-  else if (view === 'trending') {
-    $('#tradeLayout').classList.remove('show-term');
+  else {
+    S.onCoin = false;
+    $('#homeView').hidden = false;
+    $('#coinView').hidden = true;
     closeSheet();
+    renderCoinList();
+    renderHomeSide();
   }
   if (!['trending', 'leaderboard', 'profile'].includes(view)) view = 'trending';
   S.view = view;
@@ -1364,13 +1591,6 @@ addEventListener('hashchange', route);
   try { await refreshMe(); } catch { /* offline */ }
   connectStream();
   route();
-  // Desktop: open the hottest coin straight away so the terminal isn't empty.
-  if (!location.hash.startsWith('#coin/') && !isMobile() && S.view === 'trending') {
-    const wait = setInterval(() => {
-      if (S.trending.length && !S.selected && S.view === 'trending') { clearInterval(wait); location.replace(`#coin/${S.trending[0]}`); }
-      if (S.selected) clearInterval(wait);
-    }, 300);
-  }
   setInterval(() => { if (S.user) refreshMe().catch(() => {}); }, 30_000);
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('/sw.js').catch(() => {});
 })();
