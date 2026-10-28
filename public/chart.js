@@ -11,7 +11,10 @@ export class CandleChart {
     this.mult = 1;            // display value = price * mult (1 = price, supply = market cap)
     // candles
     this.data = [];
-    this.barW = 9;
+    this.barW = 7;
+    this.legend = '';         // e.g. "BONK/SOL Market Cap (USD) · 1s"
+    this.emptyMsg = 'loading candles…';
+    this.tfSec = 60;          // candle size, for time labels
     this.offset = 0;
     // live line
     this.points = [];         // [{t: ms, p: price}] ascending
@@ -81,6 +84,8 @@ export class CandleChart {
     this.flash = performance.now();
   }
   setLines(lines) { this.lines = lines || []; this.draw(); }
+  setLegend(text, tfSec) { this.legend = text || ''; if (tfSec) this.tfSec = tfSec; this.draw(); }
+  setEmpty(msg) { this.emptyMsg = msg; this.draw(); }
   setMarkers(markers) { this.markers = markers || []; this.draw(); }
   resetView() { this.offset = 0; this.offsetMs = 0; this.range = null; this.draw(); }
   get isLive() { return this.mode === 'line' && this.offsetMs < 1000; }
@@ -341,7 +346,7 @@ export class CandleChart {
     const { ctx } = this; const { up, down, grid, muted, text } = this.colors;
     const W = this.w, H = this.h, PW = this.plotW, PH = this.plotH;
     ctx.clearRect(0, 0, W, H);
-    if (!this.data.length) { this.emptyText('loading candles…'); return; }
+    if (!this.data.length) { this.emptyText(this.emptyMsg); return; }
     const m = this.mult;
     const { start, end } = this.visibleRange();
     const vis = this.data.slice(start, end);
@@ -351,7 +356,7 @@ export class CandleChart {
     if (min === max) { min *= 0.98; max *= 1.02; }
     const pad = (max - min) * 0.08;
     min -= pad; max += pad;
-    const top = 12, bottom = PH - 6;
+    const top = 46, bottom = PH - 8;
     this.scale = { min, max, top, bottom };
     const y = (v) => top + ((max - v) / (max - min)) * (bottom - top);
     this.axisAndGrid(min, max, top, bottom, y);
@@ -362,7 +367,7 @@ export class CandleChart {
       const xx = this.xOf(i);
       if (xx < 20 || xx > PW - 20) continue;
       ctx.fillStyle = muted;
-      ctx.fillText(timeLabel(this.data[i].time, this.data), xx, PH + 13);
+      ctx.fillText(timeLabel(this.data[i].time, this.data, this.tfSec), xx, PH + 13);
       ctx.strokeStyle = grid;
       ctx.beginPath(); ctx.moveTo(Math.round(xx) + 0.5, 0); ctx.lineTo(Math.round(xx) + 0.5, PH); ctx.stroke();
     }
@@ -371,8 +376,8 @@ export class CandleChart {
     if (vmax > 0) {
       for (let i = start; i < end; i++) {
         const c = this.data[i];
-        const vh = ((c.volume || 0) / vmax) * PH * 0.16;
-        ctx.fillStyle = hexA(c.close >= c.open ? up : down, 0.18);
+        const vh = ((c.volume || 0) / vmax) * PH * 0.2;
+        ctx.fillStyle = hexA(c.close >= c.open ? up : down, 0.42);
         const bw = Math.max(1, this.barW * 0.7);
         ctx.fillRect(this.xOf(i) - bw / 2, PH - vh, bw, vh);
       }
@@ -398,23 +403,32 @@ export class CandleChart {
     ctx.setLineDash([]);
     const flashing = performance.now() - this.flash < 350;
     pill(ctx, this.fmt(last.close * m), PW + 3, ly, flashing ? '#ffffff' : lastCol, '#0b0b0e', this.axisW - 6, this.font(11, 700));
+    let hc = null;
     if (this.hover && this.hover.x < PW && this.hover.y < PH) {
       const n = this.data.length;
       const i = Math.round(n - this.offset - 0.5 - (this.plotW - 6 - this.hover.x) / this.barW);
-      const c = this.data[i];
+      hc = this.data[i] || null;
+      const opts = this.tfSec < 60 ? { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }
+        : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
       this.crosshair(this.hover.x, this.hover.y, this.fmt(this.valueAt(this.hover.y)),
-        c ? new Date(c.time * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '', text);
-      if (c) {
-        const chg = ((c.close / c.open - 1) * 100).toFixed(2);
-        const s = `O ${this.fmt(c.open * m)}  H ${this.fmt(c.high * m)}  L ${this.fmt(c.low * m)}  C ${this.fmt(c.close * m)}  ${chg > 0 ? '+' : ''}${chg}%`;
-        ctx.font = this.font(11);
-        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.fillStyle = hexA(this.colors.panel, 0.9);
-        ctx.fillRect(6, 4, Math.min(PW - 12, ctx.measureText(s).width + 12), 20);
-        ctx.fillStyle = c.close >= c.open ? up : down;
-        ctx.fillText(s, 12, 14);
-      }
+        hc ? new Date(hc.time * 1000).toLocaleString([], opts) : '', text);
     }
+    // legend (top-left, like a TradingView chart): pair · timeframe · O H L C change, then volume
+    const c = hc || last;
+    const prev = this.data[this.data.indexOf(c) - 1];
+    const base = prev ? prev.close : c.open;
+    const d = c.close * m - base * m;
+    const col = c.close >= c.open ? up : down;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    let x = 10;
+    const put = (s, color, font) => { ctx.font = font || this.font(11.5, 500); ctx.fillStyle = color; ctx.fillText(s, x, 15); x += ctx.measureText(s).width + 6; };
+    if (this.legend) put(this.legend, text, `500 12px "Geist", ui-sans-serif, system-ui, sans-serif`);
+    for (const [k, v] of [['O', c.open], ['H', c.high], ['L', c.low], ['C', c.close]]) { if (x > PW - 60) break; put(k, muted); x -= 3; put(this.fmt(v * m), col); }
+    if (x < PW - 80) put(`${d >= 0 ? '+' : ''}${this.fmt(d)} (${base ? ((c.close / base - 1) * 100).toFixed(2) : '0.00'}%)`, col);
+    x = 10;
+    ctx.font = this.font(11.5, 500); ctx.fillStyle = muted; ctx.fillText('Volume', x, 34);
+    x += ctx.measureText('Volume').width + 8;
+    ctx.fillStyle = col; ctx.fillText(fmtVol(c.volume || 0), x, 34);
   }
   visibleRange() {
     const n = this.data.length;
@@ -505,8 +519,12 @@ function niceTicks(min, max, count) {
   for (let v = Math.ceil(min / step) * step; v <= max; v += step) out.push(v);
   return out;
 }
-function timeLabel(sec, data) {
+function fmtVol(v) {
+  return v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `$${(v / 1e3).toFixed(2)}K` : `$${v.toFixed(2)}`;
+}
+function timeLabel(sec, data, tfSec = 60) {
   const d = new Date(sec * 1000);
+  if (tfSec < 60) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   const spanDays = data.length > 1 ? (data[data.length - 1].time - data[0].time) / 86400 : 0;
   if (d.getHours() === 0 && d.getMinutes() === 0 && spanDays > 1) return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
