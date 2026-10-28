@@ -70,7 +70,7 @@ function serveStatic(req, res, pathname) {
     'cache-control': ext === '.png' || ext === '.ico' ? 'public, max-age=86400' : 'no-cache',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'same-origin',
-    ...(ext === '.html' ? { 'content-security-policy': "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com; frame-ancestors 'none'" } : {}),
+    ...(ext === '.html' ? { 'content-security-policy': "default-src 'self'; img-src 'self' https: data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com; frame-ancestors 'none'" } : {}),
   });
   fs.createReadStream(file).pipe(res);
 }
@@ -138,7 +138,7 @@ async function api(req, res, url) {
   }
   if (p === '/api/health' && m === 'GET') {
     const s = cloud.status;
-    return send(res, 200, { ok: true, market: market.mode, cloudSave: s.enabled ? { on: true, pending: s.pending, lastSyncAt: s.lastSyncAt, error: s.lastError } : { on: false } });
+    return send(res, 200, { ok: true, market: market.mode, feed: market.feedStatus(), cloudSave: s.enabled ? { on: true, pending: s.pending, lastSyncAt: s.lastSyncAt, error: s.lastError } : { on: false } });
   }
   if (p === '/api/badges' && m === 'GET') return send(res, 200, game.BADGES);
   if (p === '/api/feed' && m === 'GET') return send(res, 200, game.recentFeed(40));
