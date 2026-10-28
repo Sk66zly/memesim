@@ -156,7 +156,7 @@ function account(userId) {
   if (CFG.startingUsd + v.profit >= CFG.whaleTarget) award(u.id, 'whale', `Traded $1,000 up to $${Math.round(CFG.startingUsd + v.profit).toLocaleString('en-US')}`);
   return {
     id: u.id, username: u.username, email: u.email, createdAt: u.created_at,
-    avatar: u.avatar || null, color: u.color || null, bio: u.bio || '',
+    avatar: u.avatar || null, color: u.color || null, bio: u.bio || '', photoUrl: photoUrlFor(u.id),
     usd: u.usd, sol: u.sol, solPrice: market.solPrice, netDeposits: u.net_deposits,
     holdings: v.holdings, value: v.value, profit: v.profit,
     faucet: { amountSol: CFG.faucetSol, cooldownMin: CFG.faucetCooldownMin, nextAt: u.faucet_at + CFG.faucetCooldownMin * 60_000 },
@@ -215,7 +215,36 @@ function updateProfile(userId, body) {
   if (avatar && !AVATARS.includes(avatar)) throw new GameError('Pick one of the avatars shown.');
   if (color && !COLORS.includes(color)) throw new GameError('Pick one of the colors shown.');
   db.prepare('UPDATE users SET avatar = ?, color = ?, bio = ? WHERE id = ?').run(avatar, color, bio, userId);
+  if (body && 'photo' in body) setPhoto(userId, body.photo);
   return { avatar, color, bio };
+}
+
+// ---------------- profile pictures ----------------
+const MAX_PHOTO_BYTES = 150_000;
+function photoVersions() {
+  return new Map(db.prepare('SELECT user_id, updated_at FROM avatars').all().map((r) => [r.user_id, r.updated_at]));
+}
+function photoUrlFor(userId, versions) {
+  const v = (versions || photoVersions()).get(userId);
+  return v ? `/api/avatar/${userId}?v=${v}` : null;
+}
+function setPhoto(userId, dataUrl) {
+  if (dataUrl == null || dataUrl === '') { db.prepare('DELETE FROM avatars WHERE user_id = ?').run(userId); return; }
+  const m = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl));
+  if (!m) throw new GameError('Profile pictures must be PNG, JPEG or WebP images.');
+  const bytes = Buffer.from(m[2], 'base64');
+  if (bytes.length > MAX_PHOTO_BYTES) throw new GameError('That picture is too big. Try a smaller one.');
+  const sig = { png: [0x89, 0x50, 0x4e, 0x47], jpeg: [0xff, 0xd8, 0xff] }[m[1]];
+  const ok = sig ? sig.every((b, i) => bytes[i] === b)
+    : bytes.slice(0, 4).toString('latin1') === 'RIFF' && bytes.slice(8, 12).toString('latin1') === 'WEBP';
+  if (!ok) throw new GameError("That file isn't a real image.");
+  db.prepare(`INSERT INTO avatars (user_id, mime, data, updated_at) VALUES (?, ?, ?, ?)
+              ON CONFLICT(user_id) DO UPDATE SET mime = excluded.mime, data = excluded.data, updated_at = excluded.updated_at`)
+    .run(userId, `image/${m[1]}`, m[2], Date.now());
+}
+function photoFile(userId) {
+  const r = db.prepare('SELECT mime, data FROM avatars WHERE user_id = ?').get(Number(userId));
+  return r ? { mime: r.mime, bytes: Buffer.from(r.data, 'base64') } : null;
 }
 
 // What anyone can see about a player (no email).
@@ -225,7 +254,7 @@ function publicProfile(username, meId) {
   const v = accountValue(u);
   const sells = db.prepare(`SELECT COUNT(*) AS n, SUM(pnl_usd > 0) AS wins, MAX(pnl_pct) AS best FROM trades WHERE user_id = ? AND side = 'sell'`).get(u.id);
   return {
-    username: u.username, avatar: u.avatar || null, color: u.color || null, bio: u.bio || '',
+    username: u.username, avatar: u.avatar || null, color: u.color || null, bio: u.bio || '', photoUrl: photoUrlFor(u.id),
     createdAt: u.created_at, isMe: u.id === meId,
     value: v.value, profit: v.profit,
     trades: db.prepare('SELECT COUNT(*) AS n FROM trades WHERE user_id = ?').get(u.id).n,
@@ -410,6 +439,7 @@ function leaderboard(range, meId) {
   const span = RANGES[range];
   const start = span ? Date.now() - span : null;
   const badges = badgeMap();
+  const photos = photoVersions();
   const baseAt = start == null ? null : db.prepare('SELECT profit FROM snapshots WHERE user_id = ? AND ts <= ? ORDER BY ts DESC LIMIT 1');
   const earliest = db.prepare('SELECT profit FROM snapshots WHERE user_id = ? ORDER BY ts ASC LIMIT 1');
 
@@ -423,7 +453,7 @@ function leaderboard(range, meId) {
     const gain = v.profit - baseline;
     const base = u.net_deposits + baseline;
     return {
-      userId: u.id, username: u.username, avatar: u.avatar || null, color: u.color || null, value: v.value, profit: gain,
+      userId: u.id, username: u.username, avatar: u.avatar || null, color: u.color || null, photoUrl: photoUrlFor(u.id, photos), value: v.value, profit: gain,
       profitPct: base > 0 ? (gain / base) * 100 : 0,
       badges: badges.get(u.id) || [],
     };
@@ -435,6 +465,6 @@ function leaderboard(range, meId) {
 }
 
 module.exports = {
-  CFG, BADGES, AVATARS, COLORS, GameError, register, deposit, updateProfile, publicProfile, setWatch, login, userFromSession, destroySession, account, faucet, trade,
+  CFG, BADGES, AVATARS, COLORS, GameError, photoFile, register, deposit, updateProfile, publicProfile, setWatch, login, userFromSession, destroySession, account, faucet, trade,
   myTrades, recentFeed, leaderboard, snapshotsFor, takeSnapshots, checkTimedBadges, takeNewBadges, badgesFor,
 };
