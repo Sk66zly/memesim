@@ -66,7 +66,8 @@ function serveStatic(req, res, pathname) {
   const ext = path.extname(file);
   res.writeHead(200, {
     'content-type': TYPES[ext] || 'application/octet-stream',
-    'cache-control': ext === '.html' || file.endsWith('sw.js') ? 'no-cache' : 'public, max-age=3600',
+    // Code and styles: browsers must check for a newer version on every visit, so updates show up right away.
+    'cache-control': ext === '.png' || ext === '.ico' ? 'public, max-age=86400' : 'no-cache',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'same-origin',
     ...(ext === '.html' ? { 'content-security-policy': "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com; frame-ancestors 'none'" } : {}),
