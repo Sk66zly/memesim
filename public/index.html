@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>MemeSim — Memecoin Paper Trading</title>
   <meta name="description" content="Trade real trending Solana memecoins with 100% fake money. Climb the leaderboard, earn badges.">
-  <meta name="theme-color" content="#000000">
+  <meta name="theme-color" content="#0b0b0e">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -15,150 +15,161 @@
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-row">
-      <a class="logo" href="#trending" aria-label="MemeSim home"><span class="logo-mark">M$</span><span class="logo-word">MEMESIM</span><span class="cursor">_</span></a>
+      <a class="logo" href="#trending" aria-label="MemeSim home"><span class="logo-mark" aria-hidden="true">m$</span><span class="logo-word">memesim</span></a>
       <nav class="tabs" role="tablist" aria-label="Main">
-        <button class="tab" role="tab" data-view="trending" aria-selected="true">Trending Coins</button>
-        <button class="tab" role="tab" data-view="leaderboard" aria-selected="false">Leaderboard</button>
-        <button class="tab" role="tab" data-view="profile" aria-selected="false">Profile</button>
+        <button class="tab" role="tab" data-view="trending" aria-selected="true"><span class="tab-ico" aria-hidden="true">🔥</span>Trending</button>
+        <button class="tab" role="tab" data-view="leaderboard" aria-selected="false"><span class="tab-ico" aria-hidden="true">🏆</span>Leaderboard</button>
+        <button class="tab" role="tab" data-view="profile" aria-selected="false"><span class="tab-ico" aria-hidden="true">👤</span>Profile</button>
       </nav>
+      <form class="search" id="caSearch" role="search">
+        <span class="search-ico" aria-hidden="true">⌕</span>
+        <input id="caInput" placeholder="Search coins or paste an address" autocomplete="off" spellcheck="false" aria-label="Search coins or paste a Solana token address">
+      </form>
       <div class="acct" id="acct"></div>
     </div>
-    <div class="ticker" aria-label="Live player trades">
+    <div class="ticker" aria-label="Live activity">
       <span class="live-dot" id="modeBadge">LIVE</span>
       <div class="ticker-track"><div class="ticker-inner" id="ticker"></div></div>
     </div>
   </header>
 
   <main id="app">
-    <!-- TRENDING -->
+    <!-- TRENDING: home grid + coin page -->
     <section class="view" id="view-trending" data-active="true">
-      <div class="trade-layout" id="tradeLayout">
-        <aside class="coin-list panel" id="coinListPanel">
-          <div class="panel-head">
-            <span class="ph-title">// TRENDING · SOLANA</span>
-            <span class="ph-sub" id="coinCount"></span>
-          </div>
+      <div id="homeView">
+        <div class="home-top">
+          <div class="featured card" id="featured" aria-live="polite"></div>
+          <div class="home-side card" id="homeSide"></div>
+        </div>
+        <div class="list-head">
+          <h1 class="section-title">Trending on Solana <span class="count" id="coinCount"></span></h1>
           <div class="sort-chips" role="group" aria-label="Sort coins">
             <button class="chip" data-sort="hot" aria-pressed="true">🔥 Hot</button>
-            <button class="chip" data-sort="gainers" aria-pressed="false">24h ▲</button>
-            <button class="chip" data-sort="m5" aria-pressed="false">5m ▲</button>
-            <button class="chip" data-sort="volume" aria-pressed="false">Vol</button>
+            <button class="chip" data-sort="gainers" aria-pressed="false">Top 24h</button>
+            <button class="chip" data-sort="m5" aria-pressed="false">Movers 5m</button>
+            <button class="chip" data-sort="volume" aria-pressed="false">Volume</button>
             <button class="chip" data-sort="watch" aria-pressed="false">★ Watching</button>
           </div>
-          <form class="ca-search" id="caSearch">
-            <input id="caInput" placeholder="Paste a Solana token address…" autocomplete="off" spellcheck="false" aria-label="Token address">
-            <button class="btn-ghost" type="submit">Go</button>
-          </form>
-          <div class="coin-rows" id="coinRows" role="list"></div>
-        </aside>
+        </div>
+        <div class="coin-grid" id="coinRows" role="list"></div>
+      </div>
 
-        <section class="terminal panel" id="terminal" aria-label="Trading terminal">
-          <div class="term-empty" id="termEmpty">
-            <div class="term-empty-inner">
-              <div class="big-glyph">▚</div>
-              <p>Select a trending coin to open the terminal.</p>
-            </div>
-          </div>
-          <div class="term-body" id="termBody" hidden>
-            <div class="term-head">
-              <button class="back-btn" id="backBtn" aria-label="Back to coin list">←</button>
+      <div id="coinView" hidden>
+        <div class="coin-layout" id="tradeLayout">
+          <div class="coin-main">
+            <div class="coin-head card">
+              <button class="back-btn" id="backBtn" aria-label="Back to trending coins">←</button>
+              <img class="tok-img" id="tokImg" alt="">
               <div class="tok-id">
-                <img class="tok-img" id="tokImg" alt="">
-                <div>
-                  <div class="tok-sym" id="tokSym"></div>
-                  <div class="tok-name" id="tokName"></div>
-                </div>
+                <div class="tok-title"><span class="tok-sym" id="tokSym"></span><span class="tok-name" id="tokName"></span></div>
+                <div class="tok-meta" id="tokMeta"></div>
               </div>
               <button class="watch-btn" id="watchBtn" type="button" aria-pressed="false">☆ Watch</button>
-              <div class="tok-price-wrap">
-                <div class="tok-price" id="tokPrice">—</div>
-                <div class="tok-chg" id="tokChg"></div>
+              <div class="tok-figures">
+                <div class="fig"><span class="k">Market cap</span><span class="v big" id="tokMcap">—</span></div>
+                <div class="fig"><span class="k">Price</span><span class="v" id="tokPrice">—</span></div>
+                <div class="fig hide-sm"><span class="k">24h vol</span><span class="v" id="tokVol">—</span></div>
+                <div class="fig"><span class="k">24h</span><span class="v" id="tokChg">—</span></div>
               </div>
             </div>
-            <div class="stat-strip" id="statStrip"></div>
-            <button class="my-pos-strip" id="myPosStrip" hidden></button>
-            <div class="chart-bar">
-              <div class="tf-group" role="group" aria-label="Timeframe">
-                <button class="tf" data-tf="1" aria-pressed="true">1m</button>
-                <button class="tf" data-tf="5" aria-pressed="false">5m</button>
-                <button class="tf" data-tf="15" aria-pressed="false">15m</button>
-                <button class="tf" data-tf="60" aria-pressed="false">1h</button>
-              </div>
-              <span class="chart-hint">drag · zoom · <b>tap chart to trade</b></span>
-              <button class="btn-ghost small" id="resetView">⟲ Latest</button>
-            </div>
-            <div class="chart-wrap" id="chartWrap"></div>
 
-            <div class="term-lower">
-              <div class="trade-box" id="tradeBox">
-                <div class="tb-sides" role="tablist" aria-label="Order side">
-                  <button class="side buy" data-side="buy" aria-selected="true">BUY</button>
-                  <button class="side sell" data-side="sell" aria-selected="false">SELL</button>
+            <div class="chart-card card">
+              <div class="chart-bar">
+                <div class="seg" role="group" aria-label="Chart view">
+                  <button class="tf" data-tf="live" aria-pressed="true"><span class="live-pip" aria-hidden="true"></span>Live</button>
+                  <button class="tf" data-tf="1" aria-pressed="false">1m</button>
+                  <button class="tf" data-tf="5" aria-pressed="false">5m</button>
+                  <button class="tf" data-tf="15" aria-pressed="false">15m</button>
+                  <button class="tf" data-tf="60" aria-pressed="false">1h</button>
                 </div>
-                <div class="tb-row">
-                  <label class="tb-label" for="amountInput" id="amountLabel">Amount to spend</label>
-                  <div class="cur-toggle" role="group" aria-label="Currency">
-                    <button data-cur="USD" aria-pressed="true">USD</button>
-                    <button data-cur="SOL" aria-pressed="false">SOL</button>
-                  </div>
+                <div class="seg" role="group" aria-label="Show price or market cap">
+                  <button class="scale" data-scale="mcap" aria-pressed="true">MCap</button>
+                  <button class="scale" data-scale="price" aria-pressed="false">Price</button>
                 </div>
-                <div class="amount-field">
-                  <span class="amount-prefix" id="amountPrefix">$</span>
-                  <input id="amountInput" inputmode="decimal" autocomplete="off" placeholder="0.00" aria-describedby="tradeEst">
-                  <button class="max-btn" id="maxBtn" type="button">MAX</button>
-                </div>
-                <div class="quick" id="quickBtns"></div>
-                <div class="tb-est" id="tradeEst" aria-live="polite"></div>
-                <button class="exec buy" id="execBtn">BUY</button>
-                <div class="tb-bal" id="tbBal"></div>
+                <span class="chart-hint" id="chartHint">updates every second · drag · zoom · tap to trade</span>
+                <button class="btn-ghost small" id="resetView">⟲ Latest</button>
               </div>
-              <div class="tape panel-inner">
-                <div class="mini-head"><span>// LIVE ON-CHAIN TRADES</span><span class="pulse-dot"></span></div>
-                <div class="tape-rows" id="tapeRows"></div>
+              <div class="chart-wrap" id="chartWrap"></div>
+            </div>
+
+            <div class="stats-card card" id="statStrip"></div>
+
+            <div class="tape card">
+              <div class="card-tabs" role="tablist" aria-label="Trades">
+                <button class="ctab" data-tape="live" aria-selected="true">Live trades <span class="pulse-dot" aria-hidden="true"></span></button>
+                <button class="ctab" data-tape="mine" aria-selected="false">My trades</button>
               </div>
+              <div class="tape-head" id="tapeHead"><span>Type</span><span>Wallet</span><span class="r">Size</span><span class="r">When</span></div>
+              <div class="tape-rows" id="tapeRows"></div>
+              <div class="tape-rows" id="myTradesRows" hidden></div>
             </div>
           </div>
-        </section>
 
-        <aside class="positions-tab" id="posTab" aria-label="Active positions">
-          <button class="pos-handle" id="posHandle" aria-expanded="false">
-            <span>POSITIONS</span><b id="posCount">0</b>
-          </button>
-          <div class="pos-inner panel">
-            <div class="panel-head">
-              <span class="ph-title">// ACTIVE POSITIONS</span>
-              <button class="btn-ghost small pos-close" id="posClose" aria-label="Close positions">✕</button>
+          <aside class="coin-side">
+            <div class="trade-box card" id="tradeBox">
+              <div class="tb-sides" role="tablist" aria-label="Order side">
+                <button class="side buy" data-side="buy" aria-selected="true">Buy</button>
+                <button class="side sell" data-side="sell" aria-selected="false">Sell</button>
+              </div>
+              <div class="tb-row">
+                <label class="tb-label" for="amountInput" id="amountLabel">Amount to spend</label>
+                <div class="cur-toggle" role="group" aria-label="Currency">
+                  <button data-cur="USD" aria-pressed="true">USD</button>
+                  <button data-cur="SOL" aria-pressed="false">SOL</button>
+                </div>
+              </div>
+              <div class="amount-field">
+                <span class="amount-prefix" id="amountPrefix">$</span>
+                <input id="amountInput" inputmode="decimal" autocomplete="off" placeholder="0.00" aria-describedby="tradeEst">
+                <button class="max-btn" id="maxBtn" type="button">Max</button>
+              </div>
+              <div class="quick" id="quickBtns"></div>
+              <div class="tb-est" id="tradeEst" aria-live="polite"></div>
+              <button class="exec buy" id="execBtn">Buy</button>
+              <div class="tb-bal" id="tbBal"></div>
             </div>
-            <div class="pos-total" id="posTotal"></div>
-            <div class="pos-list" id="posList"></div>
-          </div>
-        </aside>
-      </div>
-      <div class="mobile-trade-bar" id="mobileTradeBar">
-        <button class="exec buy" data-open-side="buy">BUY</button>
-        <button class="exec sell" data-open-side="sell">SELL</button>
+
+            <button class="my-pos-strip card" id="myPosStrip" hidden></button>
+
+            <aside class="positions-tab" id="posTab" aria-label="Your positions">
+              <button class="pos-handle" id="posHandle" aria-expanded="false"><span>Positions</span><b id="posCount">0</b></button>
+              <div class="pos-inner card">
+                <div class="card-head">
+                  <span class="card-title">Your positions</span>
+                  <button class="btn-ghost small pos-close" id="posClose" aria-label="Close positions">✕</button>
+                </div>
+                <div class="pos-total" id="posTotal"></div>
+                <div class="pos-list" id="posList"></div>
+              </div>
+            </aside>
+          </aside>
+        </div>
+        <div class="mobile-trade-bar" id="mobileTradeBar">
+          <button class="exec buy" data-open-side="buy">Buy</button>
+          <button class="exec sell" data-open-side="sell">Sell</button>
+        </div>
       </div>
     </section>
 
     <!-- LEADERBOARD -->
     <section class="view" id="view-leaderboard" data-active="false">
-      <div class="lb-wrap panel">
+      <div class="lb-wrap card">
         <div class="lb-head">
           <div>
-            <h1 class="h-title">GLOBAL LEADERBOARD</h1>
-            <p class="h-sub">Ranked by simulated trading profit. Faucet top-ups don't count — only trading does.</p>
+            <h1 class="section-title">Leaderboard</h1>
+            <p class="h-sub">Ranked by trading profit. Money you add yourself never counts. Tap a player to see their profile.</p>
           </div>
-          <div class="range-chips" role="group" aria-label="Timeframe">
-            <button class="chip" data-range="24h" aria-pressed="true">24H</button>
-            <button class="chip" data-range="30d" aria-pressed="false">30D</button>
-            <button class="chip" data-range="60d" aria-pressed="false">60D</button>
-            <button class="chip" data-range="all" aria-pressed="false">ALL TIME</button>
+          <div class="range-chips seg" role="group" aria-label="Timeframe">
+            <button class="chip" data-range="24h" aria-pressed="true">24h</button>
+            <button class="chip" data-range="30d" aria-pressed="false">30d</button>
+            <button class="chip" data-range="60d" aria-pressed="false">60d</button>
+            <button class="chip" data-range="all" aria-pressed="false">All time</button>
           </div>
         </div>
         <div class="lb-table" role="table" aria-label="Top 100 players">
@@ -178,31 +189,30 @@
     </section>
   </main>
 
-  <!-- Trade sheet backdrop (mobile) -->
   <div class="sheet-backdrop" id="sheetBackdrop" hidden></div>
 
   <!-- Auth -->
   <div class="modal" id="authModal" hidden role="dialog" aria-modal="true" aria-labelledby="authTitle">
-    <form class="auth-card panel" id="authForm">
+    <form class="auth-card card" id="authForm">
       <button type="button" class="modal-x" id="authClose" aria-label="Close">✕</button>
-      <div class="auth-logo"><span class="logo-mark">M$</span></div>
-      <h2 id="authTitle">CREATE ACCOUNT</h2>
+      <div class="auth-logo"><span class="logo-mark">m$</span></div>
+      <h2 id="authTitle">Create account</h2>
       <p class="auth-sub" id="authSub">Get <b class="up">$1,000 mock USD</b> to trade real trending memecoins. No real money, ever.</p>
       <label class="field" id="userField"><span>Username</span><input name="username" autocomplete="username" maxlength="16" placeholder="degen_420"></label>
       <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" required placeholder="you@email.com"></label>
       <label class="field"><span>Password</span><input name="password" type="password" autocomplete="new-password" minlength="8" required placeholder="8+ characters"></label>
       <div class="auth-err" id="authErr" role="alert"></div>
-      <button class="exec buy" type="submit" id="authSubmit">START TRADING</button>
+      <button class="exec buy" type="submit" id="authSubmit">Start trading</button>
       <button class="link-btn" type="button" id="authSwitch">Already have an account? Log in</button>
     </form>
   </div>
 
   <!-- Add funds -->
   <div class="modal" id="fundsModal" data-modal hidden role="dialog" aria-modal="true" aria-labelledby="fundsTitle">
-    <form class="sheet-card panel" id="fundsForm">
+    <form class="sheet-card card" id="fundsForm">
       <button type="button" class="modal-x" data-close aria-label="Close">✕</button>
-      <h2 id="fundsTitle">ADD FUNDS</h2>
-      <p class="auth-sub">Put any amount of <b class="up">mock money</b> in your wallet. It's fake. Added money never counts as profit on the leaderboard.</p>
+      <h2 id="fundsTitle">Add funds</h2>
+      <p class="auth-sub">Put any amount of <b class="up">mock money</b> in your wallet. It's fake, and money you add never counts as profit on the leaderboard.</p>
       <div class="tb-row">
         <span class="tb-label">Currency</span>
         <div class="cur-toggle" role="group" aria-label="Currency to add">
@@ -217,28 +227,36 @@
       <div class="quick" id="fundsQuick"></div>
       <div class="tb-est" id="fundsEst" aria-live="polite"></div>
       <div class="auth-err" id="fundsErr" role="alert"></div>
-      <button class="exec buy" type="submit" id="fundsSubmit">ADD TO WALLET</button>
+      <button class="exec buy" type="submit" id="fundsSubmit">Add to wallet</button>
       <button class="link-btn" type="button" id="fundsDrop">or grab a free 5 SOL drop</button>
     </form>
   </div>
 
   <!-- Edit profile -->
   <div class="modal" id="profileModal" data-modal hidden role="dialog" aria-modal="true" aria-labelledby="profileTitle">
-    <form class="sheet-card panel" id="profileForm">
+    <form class="sheet-card card" id="profileForm">
       <button type="button" class="modal-x" data-close aria-label="Close">✕</button>
-      <h2 id="profileTitle">EDIT PROFILE</h2>
+      <h2 id="profileTitle">Edit profile</h2>
       <div class="pe-preview" id="pePreview"></div>
-      <div class="field"><span>Avatar</span><div class="emoji-grid" id="peAvatars" role="radiogroup" aria-label="Avatar"></div></div>
+      <div class="field"><span>Profile picture</span>
+        <div class="photo-row">
+          <label class="btn-ghost upload-btn" for="pePhotoInput">📷 Upload photo</label>
+          <input type="file" id="pePhotoInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          <button type="button" class="link-btn" id="pePhotoRemove" hidden>Remove photo</button>
+        </div>
+        <em class="hint">JPG, PNG or WebP. We crop it to a square and shrink it for you.</em>
+      </div>
+      <div class="field"><span>Or pick an avatar</span><div class="emoji-grid" id="peAvatars" role="radiogroup" aria-label="Avatar"></div></div>
       <div class="field"><span>Color</span><div class="swatches" id="peColors" role="radiogroup" aria-label="Color"></div></div>
       <label class="field"><span>Bio <em class="muted" id="peCount">0/140</em></span><textarea id="peBio" maxlength="140" rows="3" placeholder="Diamond hands since 2024. Not financial advice."></textarea></label>
       <div class="auth-err" id="peErr" role="alert"></div>
-      <button class="exec buy" type="submit" id="peSave">SAVE PROFILE</button>
+      <button class="exec buy" type="submit" id="peSave">Save profile</button>
     </form>
   </div>
 
   <!-- Someone else's profile -->
   <div class="modal" id="playerModal" data-modal hidden role="dialog" aria-modal="true" aria-label="Player profile">
-    <div class="sheet-card panel wide" id="playerCard"></div>
+    <div class="sheet-card card wide" id="playerCard"></div>
   </div>
 
   <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
