@@ -133,7 +133,7 @@ async function api(req, res, url) {
   if (p === '/api/market' && m === 'GET') return send(res, 200, market.snapshot());
   if (p === '/api/relay/plan' && m === 'GET') return send(res, 200, market.relayPlan());
   if (p === '/api/relay' && m === 'POST') {
-    if (!rateLimit(`relay:${ip(req)}`, 40, 60_000)) throw new game.GameError('Too many price reports.', 429);
+    if (!rateLimit(`relay:${ip(req)}`, 150, 60_000)) throw new game.GameError('Too many price reports.', 429);
     return send(res, 200, market.ingestRelay(await readBody(req, 3_000_000)));
   }
   if (p === '/api/health' && m === 'GET') {
@@ -174,13 +174,20 @@ async function api(req, res, url) {
   }
   if (p === '/api/profile' && m === 'POST') {
     const u = needUser();
-    game.updateProfile(u.id, await readBody(req));
+    if (!rateLimit(`profile:${u.id}`, 20, 60_000)) throw new game.GameError('Slow down a little.', 429);
+    game.updateProfile(u.id, await readBody(req, 300_000));
     return send(res, 200, { user: game.account(u.id) });
   }
   if (p === '/api/watchlist' && m === 'POST') {
     const u = needUser();
     if (!rateLimit(`watch:${u.id}`, 60, 60_000)) throw new game.GameError('Slow down a little.', 429);
     return send(res, 200, { watchlist: game.setWatch(u.id, await readBody(req)) });
+  }
+  if ((match = p.match(/^\/api\/avatar\/(\d{1,10})$/)) && m === 'GET') {
+    const f = game.photoFile(match[1]);
+    if (!f) throw new game.GameError('No picture.', 404);
+    res.writeHead(200, { 'content-type': f.mime, 'content-length': f.bytes.length, 'cache-control': 'public, max-age=31536000, immutable', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'" });
+    return res.end(f.bytes);
   }
   if (p === '/api/options' && m === 'GET') return send(res, 200, { avatars: game.AVATARS, colors: game.COLORS, maxDepositUsd: game.CFG.maxDepositUsd });
   if ((match = p.match(/^\/api\/players\/([A-Za-z0-9_]{3,16})$/)) && m === 'GET') return send(res, 200, game.publicProfile(match[1], user?.id));
