@@ -476,11 +476,11 @@ async function loadCandles() {
       candles = hist.filter((c) => c.time < firstLive).concat(candles);
     }
     chart.setData(candles);
-    // seed the live line with recent history so it isn't empty
-    if (tf === 1 && chart.points.length < 5 && candles.length) {
-      const seed = candles.slice(-180).map((c) => ({ t: c.time * 1000 + 59_000, p: c.close }));
-      const live = chart.points.filter((p) => p.t > seed[seed.length - 1].t);
-      chart.setPoints(seed.concat(live));
+    // fill the live line with minute history from before the first live point (real trades take over after it)
+    if (tf === 1 && candles.length) {
+      const firstT = chart.points.length ? chart.points[0].t : Infinity;
+      const seed = candles.slice(-180).map((c) => ({ t: c.time * 1000 + 59_000, p: c.close })).filter((p) => p.t < firstT - 1000);
+      if (seed.length) chart.setPoints(seed.concat(chart.points));
     }
   } catch { /* fills in from live ticks */ }
 }
@@ -1128,7 +1128,7 @@ async function browserHistory(addr, tf) {
     .sort((a, b) => a.time - b.time);
 }
 
-// Live on-chain trades for the open coin, straight from GeckoTerminal every ~2.5s.
+// Live on-chain trades for the open coin, straight from GeckoTerminal every ~3s.
 // Every trade moves the live chart at its real price and time, and fills the trades list.
 let tapeBusy = false;
 let tapePauseUntil = 0;
@@ -1152,10 +1152,15 @@ setInterval(async () => {
     }).filter((x) => x.price > 0).sort((x, y) => x.ts - y.ts).slice(-60);
     if (!trades.length) return;
     // first load: draw the recent trades; afterwards only the new ones
+    const first = tradeKey.newest === 0;
     const fresh = trades.filter((x) => x.ts > tradeKey.newest);
     tradeKey.newest = Math.max(tradeKey.newest, trades[trades.length - 1].ts);
     S.tradeFeedAt = Date.now();
-    if (chart) for (const x of fresh) chart.pushPoint(x.ts, x.price);
+    if (chart && first) {
+      // real trades replace the rougher minute/poll points from the first trade onwards
+      const t0 = trades[0].ts;
+      chart.setPoints(chart.points.filter((p) => p.t < t0).concat(trades.map((x) => ({ t: x.ts, p: x.price }))));
+    } else if (chart) for (const x of fresh) chart.pushPoint(x.ts, x.price);
     addTape(trades, S.lastTapeAt > 0);
     // Coins DexScreener doesn't list yet: the newest trade is the live price.
     if (t.geckoOnly && fresh.length) {
@@ -1167,7 +1172,7 @@ setInterval(async () => {
       }
     }
   } catch (e) { if (String(e.message) === '429') tapePauseUntil = Date.now() + 20_000; } finally { tapeBusy = false; }
-}, 2500);
+}, 3000);
 
 // ================= ticker =================
 function renderTicker(fresh) {
