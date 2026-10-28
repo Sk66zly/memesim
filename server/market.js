@@ -738,7 +738,7 @@ async function start(log = console.log) {
         await pollPrices();
         if (state.solPrice && state.mode !== 'live') switchToLive('server reached the price sites');
       } catch { /* keep demo running until the server or a player's browser gets data */ }
-    }, 60_000);
+    }, 15_000);
     return;
   }
   runLiveLoops(log);
