@@ -71,6 +71,12 @@ export class CandleChart {
     const last = pts[pts.length - 1];
     if (last && Math.floor(last.t / 1000) === Math.floor(t / 1000)) { last.p = p; last.t = t; }
     else if (!last || t > last.t) pts.push({ t, p });
+    else {
+      // an on-chain trade that landed a moment before the newest point: slot it in by time
+      let i = pts.length - 1;
+      while (i > 0 && pts[i - 1].t > t) i--;
+      if (Math.abs(pts[i].t - t) < 300) pts[i].p = p; else pts.splice(i, 0, { t, p });
+    }
     if (pts.length > 8000) pts.splice(0, pts.length - 8000);
     this.flash = performance.now();
   }
@@ -261,16 +267,13 @@ export class CandleChart {
 
     const firstVal = vis[0].p * this.mult;
     const col = endVal >= firstVal ? up : down;
-    // path: steps between ticks look like a real tape; final segment extends to "now"
+    // path: a smooth line through every trade/tick; the final segment extends to "now"
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, PW, PH); ctx.clip();
     const path = new Path2D();
-    let prevY = null;
     vis.forEach((p, i) => {
       const xx = Math.max(-2, x(p.t)), yy = y(i === vis.length - 1 && this.isLive ? endVal : p.p * this.mult);
-      if (i === 0) path.moveTo(xx, yy);
-      else { path.lineTo(xx, prevY); path.lineTo(xx, yy); }
-      prevY = yy;
+      if (i === 0) path.moveTo(xx, yy); else path.lineTo(xx, yy);
     });
     const endX = this.isLive ? x(now) : x(vis[vis.length - 1].t);
     path.lineTo(endX, y(endVal));
