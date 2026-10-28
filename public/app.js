@@ -109,7 +109,7 @@ const S = {
   tokens: new Map(),
   trending: [],
   selected: null,
-  tf: 'live',
+  tf: 1,             // candle size in seconds (1s like pump.fun)
   scale: 'mcap',
   query: '',
   onCoin: false,
@@ -128,6 +128,13 @@ const S = {
   myTokenTrades: [],
   tapeSeen: new Set(),
   lastTapeAt: 0,
+  trades: [],        // on-chain trades for the open coin (oldest first)
+  tradeIds: new Set(),
+  pairs: new Map(),   // address -> latest full DexScreener pair
+  info: new Map(),    // address -> GeckoTerminal token info
+  pool: new Map(),    // address -> GeckoTerminal pool stats
+  statsTf: 'h24',
+  tape: 'live',
 };
 let chart = null;
 let es = null;
@@ -157,7 +164,7 @@ function connectStream() {
   es.addEventListener('tape', (e) => {
     const d = JSON.parse(e.data);
     if (d.address !== S.selected) return;
-    addTape(d.trades, !d.initial);
+    addTrades(d.trades, !d.initial);
   });
   es.addEventListener('feed', (e) => {
     S.feed.unshift(JSON.parse(e.data));
@@ -339,7 +346,7 @@ function renderFeatured() {
   box.dataset.key = key;
   box.innerHTML = `
     <button class="feat-inner" data-addr="${esc(t.address)}">
-      <span class="feat-label">🔥 Hottest right now</span>
+      <span class="feat-label">#1 trending</span>
       <span class="feat-row">
         ${coinImg(t, 'coin-img xl')}
         <span class="feat-body">
@@ -349,14 +356,14 @@ function renderFeatured() {
         </span>
         <span class="feat-spark">${sparkSvg(t.spark, t.change24h, 220, 70)}</span>
       </span>
-      <span class="feat-cta">Trade now →</span>
+      <span class="feat-cta">Trade</span>
     </button>`;
 }
 function renderHomeSide() {
   const box = $('#homeSide');
   if (!box) return;
   if (!S.user) {
-    box.innerHTML = `<div class="hs-title">Paper trade real memecoins</div>
+    box.innerHTML = `<div class="hs-title">Paper trading on live Solana markets</div>
       <p class="muted">Live Solana prices. $1,000 of fake money to start. Zero risk.</p>
       <button class="exec buy" data-auth="signup">Create free account</button>
       <button class="link-btn" data-auth="login">I already have one</button>`;
@@ -430,21 +437,29 @@ async function selectToken(addr) {
   }
   if (!chart) {
     chart = new CandleChart($('#chartWrap'), { formatPrice: (v) => chartFmt(v), onActivate: activateTrade });
-    chart.setMode(S.tf === 'live' ? 'line' : 'candles');
+    chart.setMode('candles');
   }
   renderTermHead();
   if (changed) {
     chart.setData([]);
-    chart.setPoints([]);
+    chart.setEmpty('loading trades…');
     S.lastFeedPrice = null;
-    $('#tapeRows').innerHTML = `<div class="tape-empty">Listening for on-chain trades…</div>`;
+    $('#tapeRows').innerHTML = `<div class="tape-empty">Loading on-chain trades…</div>`;
     S.tapeSeen = new Set();
     S.lastTapeAt = 0;
+    S.trades = [];
+    S.tradeIds = new Set();
+    tradeKey.addr = addr; tradeKey.newest = 0;
+    $('#holdersPane').innerHTML = ''; $('#tradersPane').innerHTML = '';
     connectStream();
     loadCandles();
     loadMyTokenTrades();
+    loadCoinInfo(addr);
+    pollTrades();
     feedTick();
   }
+  updateLegend();
+  renderSidePanels();
   applyChartScale();
   updateChartLines();
   renderPositions();
@@ -463,26 +478,57 @@ function applyChartScale() {
   if (Math.abs(mult / (chart.mult || 1) - 1) > 0.02) chart.setValueScale(mult);
 }
 
+const TF_LABEL = { 1: '1s', 15: '15s', 60: '1m', 300: '5m', 900: '15m', 3600: '1h', 14400: '4h', 86400: 'D' };
+function updateLegend() {
+  const t = S.tokens.get(S.selected);
+  if (!chart || !t) return;
+  const what = S.scale === 'mcap' ? 'Market Cap' : 'Price';
+  chart.setLegend(`${t.symbol || '?'}/SOL ${what} (USD) · ${TF_LABEL[S.tf] || ''} · ${t.isPump ? 'Pump' : (t.dexId || 'DEX')}`, S.tf);
+}
+
+// Candles from individual on-chain trades (1s / 15s), like pump.fun's live chart.
+function tradeCandles(trades, tf) {
+  const out = [];
+  let cur = null;
+  for (const x of trades) {
+    const time = Math.floor(x.ts / 1000 / tf) * tf;
+    if (!cur || time !== cur.time) {
+      cur = { time, open: cur ? cur.close : x.price, high: x.price, low: x.price, close: x.price, volume: 0 };
+      cur.high = Math.max(cur.high, cur.open); cur.low = Math.min(cur.low, cur.open);
+      out.push(cur);
+    }
+    cur.high = Math.max(cur.high, x.price); cur.low = Math.min(cur.low, x.price);
+    cur.close = x.price; cur.volume += x.usd || 0;
+  }
+  return out;
+}
+function redrawTradeChart() {
+  if (!chart || S.tf >= 60) return;
+  const c = tradeCandles(S.trades, S.tf);
+  chart.setEmpty(S.trades.length ? 'loading…' : 'waiting for the first trade…');
+  chart.setData(c, { keepView: true });
+}
+
 async function loadCandles() {
   const addr = S.selected;
-  const tf = S.tf === 'live' ? 1 : S.tf;
+  updateLegend();
+  if (S.tf < 60) { redrawTradeChart(); return; }
+  const tfMin = S.tf / 60;
+  chart.setData([]);
+  chart.setEmpty('loading candles…');
   try {
-    let candles = await api(`/api/candles/${addr}?tf=${tf}`);
+    let candles = tfMin <= 240 ? await api(`/api/candles/${addr}?tf=${tfMin}`) : [];
     if (addr !== S.selected) return;
     if (candles.length < 60) {
-      const hist = await browserHistory(addr, tf).catch(() => []);
+      const hist = await browserHistory(addr, tfMin).catch(() => []);
       if (addr !== S.selected) return;
       const firstLive = candles.length ? candles[0].time : Infinity;
       candles = hist.filter((c) => c.time < firstLive).concat(candles);
     }
+    if (S.tf / 60 !== tfMin) return;
+    chart.setEmpty('no candles yet');
     chart.setData(candles);
-    // fill the live line with minute history from before the first live point (real trades take over after it)
-    if (tf === 1 && candles.length) {
-      const firstT = chart.points.length ? chart.points[0].t : Infinity;
-      const seed = candles.slice(-180).map((c) => ({ t: c.time * 1000 + 59_000, p: c.close })).filter((p) => p.t < firstT - 1000);
-      if (seed.length) chart.setPoints(seed.concat(chart.points));
-    }
-  } catch { /* fills in from live ticks */ }
+  } catch { chart.setEmpty('no candles yet'); }
 }
 async function loadMyTokenTrades() {
   if (!S.user) { S.myTokenTrades = []; renderMyTrades(); return; }
@@ -502,10 +548,11 @@ function renderMyTrades() {
 }
 $$('.ctab').forEach((b) => b.addEventListener('click', () => {
   $$('.ctab').forEach((x) => x.setAttribute('aria-selected', x === b));
-  const mine = b.dataset.tape === 'mine';
-  $('#tapeRows').hidden = mine;
-  $('#myTradesRows').hidden = !mine;
-  if (mine) renderMyTrades();
+  S.tape = b.dataset.tape;
+  $$('.tape-pane').forEach((p) => { p.hidden = p.dataset.pane !== S.tape; });
+  if (S.tape === 'mine') renderMyTrades();
+  if (S.tape === 'holders') renderHoldersPane();
+  if (S.tape === 'traders') renderTraders();
 }));
 
 function renderTermHead() {
@@ -530,18 +577,10 @@ function renderTermHead() {
   const chg = $('#tokChg');
   chg.textContent = fmtPct(t.change24h, 1);
   chg.className = `v ${cls(t.change24h)}`;
-  const b = t.buys5m, s = t.sells5m;
-  const tot = (b || 0) + (s || 0);
-  $('#statStrip').innerHTML = `
-    <div class="st-grid">
-      ${[['5m', t.change5m], ['1h', t.change1h], ['24h', t.change24h]].map(([k, v]) => `<div class="st"><span class="k">${k} change</span><span class="v ${cls(v)}">${fmtPct(v, 1)}</span></div>`).join('')}
-      <div class="st"><span class="k">Liquidity</span><span class="v">${fmtUsd(t.liquidity, { compact: true })}</span></div>
-      <div class="st"><span class="k">Age</span><span class="v">${t.createdAt ? ago(t.createdAt) : '—'}</span></div>
-    </div>
-    <div class="bs">
-      <div class="bs-row"><span class="up">${b ?? '—'} buys</span><span class="muted">last 5 minutes</span><span class="down">${s ?? '—'} sells</span></div>
-      <div class="bs-bar"><span class="bs-buy" style="width:${tot ? (b / tot) * 100 : 50}%"></span><span class="bs-sell" style="width:${tot ? (s / tot) * 100 : 50}%"></span></div>
-    </div>`;
+  const info = S.info.get(t.address);
+  $('#tokHolders').textContent = info?.holders?.count ? fmtInt(info.holders.count) : '—';
+  const ath = athOf(t.address);
+  $('#tokAth').textContent = ath ? fmtUsd(ath, { compact: true }) : '—';
   document.title = `${t.symbol} ${fmtUsd(t.marketCap, { compact: true })} · MemeSim`;
   updateWatchBtn();
 }
@@ -561,10 +600,10 @@ document.addEventListener('click', async (e) => {
 function onSelectedTick(t, dir) {
   renderTermHead();
   applyChartScale();
+  renderSidePanels();
   if (!chart || !t.priceUsd) return;
-  if (!(Date.now() - (S.tradeFeedAt || 0) < 12_000)) chart.pushPoint(Date.now(), t.priceUsd);
-  if (S.tf !== 'live') {
-    const step = S.tf * 60;
+  if (S.tf >= 60 && !(Date.now() - (S.tradeFeedAt || 0) < 12_000)) {
+    const step = S.tf;
     const bucket = Math.floor(Date.now() / 1000 / step) * step;
     const last = chart.data[chart.data.length - 1];
     if (last && last.time === bucket) chart.update({ ...last, high: Math.max(last.high, t.priceUsd), low: Math.min(last.low, t.priceUsd), close: t.priceUsd });
@@ -579,10 +618,9 @@ function updateChartLines() {
 }
 
 $$('.tf').forEach((b) => b.addEventListener('click', () => {
-  S.tf = b.dataset.tf === 'live' ? 'live' : Number(b.dataset.tf);
+  S.tf = Number(b.dataset.tf);
   $$('.tf').forEach((x) => x.setAttribute('aria-pressed', x === b));
-  chart?.setMode(S.tf === 'live' ? 'line' : 'candles');
-  $('#chartHint').textContent = S.tf === 'live' ? 'updates every second · drag · zoom · tap to trade' : 'drag · zoom · tap to trade';
+  chart?.resetView();
   loadCandles();
 }));
 $$('.scale').forEach((b) => b.addEventListener('click', () => {
@@ -590,6 +628,7 @@ $$('.scale').forEach((b) => b.addEventListener('click', () => {
   $$('.scale').forEach((x) => x.setAttribute('aria-pressed', x === b));
   if (chart) chart.setValueScale(1);
   applyChartScale();
+  updateLegend();
 }));
 $('#resetView').addEventListener('click', () => chart?.resetView());
 
@@ -658,6 +697,7 @@ async function dexPairFor(addr) {
 // Fold a live price update into the page: header, chart, coin card and your position.
 function applyLivePair(addr, pair) {
   const price = Number(pair.priceUsd);
+  if (pair.txns) S.pairs.set(addr, pair);
   const prev = S.tokens.get(addr) || {};
   const next = {
     ...prev, priceUsd: price, change5m: pair.priceChange?.m5 ?? prev.change5m, change1h: pair.priceChange?.h1 ?? prev.change1h,
@@ -713,7 +753,8 @@ function updateWatchBtn() {
   if (!b) return;
   const on = watchedSet().has(S.selected);
   b.setAttribute('aria-pressed', on);
-  b.textContent = on ? '★ Watching' : '☆ Watch';
+  b.textContent = on ? '★' : '☆';
+  b.title = on ? 'On your watchlist' : 'Add to watchlist';
   b.hidden = !S.selected || String(S.selected).startsWith('DEMO');
 }
 async function toggleWatch(address = S.selected) {
@@ -742,9 +783,11 @@ function addTape(trades, fresh) {
   if (box.querySelector('.tape-empty')) box.innerHTML = '';
   const html = trades.slice().reverse().map((t) => {
     const big = t.usd >= 1000;
+    const who = t.trader ? `<a class="mono" href="${solscan(t.trader)}" target="_blank" rel="noopener">${esc(t.wallet)}</a>` : `<span class="muted">${esc(t.wallet || '')}</span>`;
     return `<div class="tape-row ${big ? 'big' : ''} ${fresh ? 'fresh-' + t.side : ''}">
       <span class="side-tag ${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? 'Buy' : 'Sell'}</span>
-      <span class="muted">${esc(t.wallet || '')}</span>
+      ${who}
+      <span class="r mono">${t.qty ? fmtQty(t.qty) : '—'}</span>
       <span class="usd ${t.side === 'buy' ? 'up' : 'down'}">${fmtUsd(t.usd, { compact: true })}</span>
       <span class="t" data-ts="${t.ts}">${ago(t.ts)}</span>
     </div>`;
@@ -1120,7 +1163,7 @@ setInterval(relayTick, 3000);
 async function browserHistory(addr, tf) {
   const t = S.tokens.get(addr);
   if (!t?.pairAddress || String(addr).startsWith('DEMO')) return [];
-  const [unit, agg] = tf >= 60 ? ['hour', Math.max(1, Math.round(tf / 60))] : ['minute', tf];
+  const [unit, agg] = tf >= 1440 ? ['day', 1] : tf >= 60 ? ['hour', Math.max(1, Math.round(tf / 60))] : ['minute', tf];
   const j = await getJ(`${GT}/networks/solana/pools/${t.pairAddress}/ohlcv/${unit}?aggregate=${agg}&limit=500&currency=usd&token=base`);
   return (j?.data?.attributes?.ohlcv_list || [])
     .map(([ts, o, h, l, c, v]) => ({ time: Math.floor(ts / (tf * 60)) * tf * 60, open: +o, high: +h, low: +l, close: +c, volume: +v || 0 }))
@@ -1128,12 +1171,37 @@ async function browserHistory(addr, tf) {
     .sort((a, b) => a.time - b.time);
 }
 
-// Live on-chain trades for the open coin, straight from GeckoTerminal every ~3s.
-// Every trade moves the live chart at its real price and time, and fills the trades list.
+// ---- live on-chain trades for the open coin (GeckoTerminal, every ~3s) ----
+// Every trade goes into one store that drives the 1s/15s candles, the trades list and the top-traders table.
 let tapeBusy = false;
 let tapePauseUntil = 0;
 const tradeKey = { addr: null, newest: 0 };
-setInterval(async () => {
+function addTrades(list, fresh) {
+  const add = [];
+  for (const x of list || []) {
+    const id = x.id || `${x.ts}${x.usd}`;
+    if (!(x.price > 0) || S.tradeIds.has(id)) continue;
+    S.tradeIds.add(id);
+    add.push({ ...x, id });
+  }
+  if (!add.length) return;
+  S.trades.push(...add);
+  S.trades.sort((a, b) => a.ts - b.ts);
+  if (S.trades.length > 6000) S.trades.splice(0, S.trades.length - 6000);
+  S.tradeFeedAt = Date.now();
+  addTape(add.slice(-60), fresh);
+  if (S.tf < 60) redrawTradeChart();
+  else if (chart) {
+    for (const x of add) {
+      const bucket = Math.floor(x.ts / 1000 / S.tf) * S.tf;
+      const last = chart.data[chart.data.length - 1];
+      if (last && last.time === bucket) chart.update({ ...last, high: Math.max(last.high, x.price), low: Math.min(last.low, x.price), close: x.price, volume: (last.volume || 0) + (x.usd || 0) });
+      else if (!last || bucket > last.time) chart.update({ time: bucket, open: last ? last.close : x.price, high: Math.max(x.price, last ? last.close : x.price), low: Math.min(x.price, last ? last.close : x.price), close: x.price, volume: x.usd || 0 });
+    }
+  }
+  if (S.tape === 'traders') renderTraders();
+}
+async function pollTrades() {
   const addr = S.selected;
   const t = S.tokens.get(addr);
   if (tapeBusy || document.hidden || !S.onCoin || !t?.pairAddress || String(addr).startsWith('DEMO') || Date.now() < tapePauseUntil) return;
@@ -1141,30 +1209,20 @@ setInterval(async () => {
   try {
     const j = await getJ(`${GT}/networks/solana/pools/${t.pairAddress}/trades`);
     if (addr !== S.selected) return;
-    if (tradeKey.addr !== addr) { tradeKey.addr = addr; tradeKey.newest = 0; }
     const trades = (j.data || []).map((row) => {
       const a = row.attributes || {};
-      const w = a.tx_from_address || '';
       const sell = a.kind === 'sell';
       return { id: a.tx_hash || row.id, side: sell ? 'sell' : 'buy', usd: Number(a.volume_in_usd) || 0,
         price: Number(sell ? a.price_from_in_usd : a.price_to_in_usd) || 0,
-        wallet: w ? `${w.slice(0, 4)}…${w.slice(-4)}` : '', ts: a.block_timestamp ? Date.parse(a.block_timestamp) : Date.now() };
-    }).filter((x) => x.price > 0).sort((x, y) => x.ts - y.ts).slice(-60);
-    if (!trades.length) return;
-    // first load: draw the recent trades; afterwards only the new ones
-    const first = tradeKey.newest === 0;
+        qty: Number(sell ? a.from_token_amount : a.to_token_amount) || 0,
+        trader: a.tx_from_address || '', ts: a.block_timestamp ? Date.parse(a.block_timestamp) : Date.now() };
+    }).map((x) => ({ ...x, wallet: x.trader ? `${x.trader.slice(0, 4)}…${x.trader.slice(-4)}` : '' }));
     const fresh = trades.filter((x) => x.ts > tradeKey.newest);
-    tradeKey.newest = Math.max(tradeKey.newest, trades[trades.length - 1].ts);
-    S.tradeFeedAt = Date.now();
-    if (chart && first) {
-      // real trades replace the rougher minute/poll points from the first trade onwards
-      const t0 = trades[0].ts;
-      chart.setPoints(chart.points.filter((p) => p.t < t0).concat(trades.map((x) => ({ t: x.ts, p: x.price }))));
-    } else if (chart) for (const x of fresh) chart.pushPoint(x.ts, x.price);
-    addTape(trades, S.lastTapeAt > 0);
+    if (trades.length) tradeKey.newest = Math.max(tradeKey.newest, ...trades.map((x) => x.ts));
+    addTrades(trades, S.lastTapeAt > 0);
     // Coins DexScreener doesn't list yet: the newest trade is the live price.
     if (t.geckoOnly && fresh.length) {
-      const last = fresh[fresh.length - 1];
+      const last = fresh.sort((x, y) => x.ts - y.ts)[fresh.length - 1];
       applyLivePair(addr, { priceUsd: last.price, pairAddress: t.pairAddress });
       if (Date.now() - lastOpenRelay > 3000) {
         lastOpenRelay = Date.now();
@@ -1172,22 +1230,199 @@ setInterval(async () => {
       }
     }
   } catch (e) { if (String(e.message) === '429') tapePauseUntil = Date.now() + 20_000; } finally { tapeBusy = false; }
-}, 3000);
+}
+setInterval(pollTrades, 3000);
+
+// ---- coin details: holders, stats, pool (GeckoTerminal + DexScreener) ----
+const fmtInt = (n) => Number(n || 0).toLocaleString('en-US');
+const shortAddr = (a) => (a ? `${a.slice(0, 4)}…${a.slice(-4)}` : '');
+const solscan = (a, kind = 'account') => `https://solscan.io/${kind}/${encodeURIComponent(a)}`;
+async function loadCoinInfo(addr) {
+  if (String(addr).startsWith('DEMO')) { renderSidePanels(); return; }
+  const t = S.tokens.get(addr);
+  const jobs = [];
+  const cached = S.info.get(addr);
+  if (!cached || Date.now() - cached.at > 300_000) {
+    jobs.push(getJ(`${GT}/networks/solana/tokens/${addr}/info`).then((j) => {
+      const a = j?.data?.attributes;
+      if (a) S.info.set(addr, { ...S.info.get(addr), ...a, at: Date.now() });
+    }).catch(() => {}));
+  }
+  if (t?.pairAddress && S.info.get(addr)?.athPrice == null) {
+    jobs.push(getJ(`${GT}/networks/solana/pools/${t.pairAddress}/ohlcv/day?aggregate=1&limit=365&currency=usd&token=base`).then((j) => {
+      const highs = (j?.data?.attributes?.ohlcv_list || []).map((c) => +c[2]).filter((v) => v > 0);
+      S.info.set(addr, { at: 0, ...S.info.get(addr), athPrice: highs.length ? Math.max(...highs) : 0 });
+    }).catch(() => {}));
+  }
+  await Promise.all(jobs);
+  await loadPool(addr);
+  if (addr === S.selected) { renderTermHead(); renderSidePanels(); if (S.tape === 'holders') renderHoldersPane(); }
+  loadHolderList(addr);
+}
+async function loadPool(addr) {
+  const t = S.tokens.get(addr);
+  if (!t?.pairAddress || String(addr).startsWith('DEMO')) return;
+  try {
+    const j = await getJ(`${GT}/networks/solana/pools/${t.pairAddress}`);
+    const a = j?.data?.attributes;
+    if (a) S.pool.set(addr, { ...a, at: Date.now() });
+  } catch { /* keep the last one */ }
+}
+setInterval(async () => {
+  if (document.hidden || !S.onCoin || !S.selected) return;
+  await loadPool(S.selected);
+  renderSidePanels();
+}, 30_000);
+function athOf(addr) {
+  const t = S.tokens.get(addr);
+  const info = S.info.get(addr);
+  const supply = supplyOf(t);
+  if (!supply) return 0;
+  const hiTrades = S.trades.length && addr === S.selected ? Math.max(...S.trades.map((x) => x.price)) : 0;
+  return Math.max(info?.athPrice || 0, hiTrades, t.priceUsd || 0) * supply;
+}
+
+// Optional full holder list (needs a Solana data key on the server; see README).
+const holderLists = new Map();
+async function loadHolderList(addr) {
+  if (holderLists.has(addr) && Date.now() - holderLists.get(addr).at < 60_000) return;
+  try {
+    const r = await api(`/api/holders/${addr}`);
+    holderLists.set(addr, { ...r, at: Date.now() });
+    if (addr === S.selected && S.tape === 'holders') renderHoldersPane();
+  } catch { holderLists.set(addr, { off: true, at: Date.now() }); }
+}
+
+function bar2(a, b, la, lb) {
+  const tot = (a || 0) + (b || 0);
+  const pa = tot ? (a / tot) * 100 : 50;
+  return `<div class="b2-row"><span class="up">${la}</span><span class="down">${lb}</span></div>
+    <div class="b2"><span class="b2-a" style="width:${pa}%"></span><span class="b2-b" style="width:${100 - pa}%"></span></div>`;
+}
+function renderSidePanels() {
+  const addr = S.selected;
+  const t = S.tokens.get(addr);
+  if (!t) return;
+  const info = S.info.get(addr) || {};
+  const pool = S.pool.get(addr) || {};
+  const pair = S.pairs.get(addr) || {};
+  const demo = String(addr).startsWith('DEMO');
+
+  // Holders
+  const h = info.holders;
+  const dist = h?.distribution_percentage || {};
+  const seg = [['Top 10', dist.top_10, '#86efac'], ['11–20', dist['11_20'] ?? dist['11_30'], '#7dd3fc'], ['21–40', dist['21_40'] ?? dist['31_50'], '#c4b5fd'], ['Rest', dist.rest, '#3f3f46']].filter((x) => x[1] != null);
+  $('#holdersTabN').textContent = h?.count ? fmtInt(h.count) : '';
+  $('#holdersCard').innerHTML = `<div class="sec-h"><span>Holders</span><b>${h?.count ? fmtInt(h.count) : '—'}</b></div>
+    ${seg.length ? `<div class="dist">${seg.map(([, v, c]) => `<span style="width:${Number(v)}%;background:${c}"></span>`).join('')}</div>
+    <div class="dist-legend">${seg.map(([k, v, c]) => `<span><i style="background:${c}"></i>${k} <b>${Number(v).toFixed(1)}%</b></span>`).join('')}</div>` : `<div class="muted small">${demo ? 'Demo coin.' : 'Loading holder data…'}</div>`}
+    ${info.developer_holding_percentage != null ? `<div class="kv"><span>Dev holds</span><b>${Number(info.developer_holding_percentage).toFixed(2)}%</b></div>` : ''}
+    <button class="link-btn" data-goto-tab="holders">View holders</button>`;
+
+  // Stats
+  const tf = S.statsTf;
+  const tfKey = { m5: 'm5', h1: 'h1', h6: 'h6', h24: 'h24' }[tf];
+  const chg = pool.price_change_percentage?.[tfKey] != null ? Number(pool.price_change_percentage[tfKey]) : pair.priceChange?.[tfKey] ?? t[{ m5: 'change5m', h1: 'change1h', h24: 'change24h' }[tf]];
+  const vol = pair.volume?.[tfKey] ?? (pool.volume_usd?.[tfKey] != null ? Number(pool.volume_usd[tfKey]) : null);
+  const tx = pair.txns?.[tfKey] || pool.transactions?.[tfKey] || {};
+  const ptx = pool.transactions?.[tfKey] || {};
+  $('#statsCard').innerHTML = `<div class="sec-h"><span>Stats</span>
+      <div class="mini-seg">${['m5', 'h1', 'h6', 'h24'].map((k) => `<button data-stats-tf="${k}" aria-pressed="${k === tf}">${{ m5: '5m', h1: '1h', h6: '6h', h24: '24h' }[k]}</button>`).join('')}</div></div>
+    <div class="kv"><span>Price change</span><b class="chg-pill ${cls(chg)}">${chg != null ? fmtPct(chg, 2) : '—'}</b></div>
+    <div class="kv"><span>Volume</span><b>${vol != null ? fmtUsd(vol, { compact: true }) : '—'}</b></div>
+    ${bar2(tx.buys, tx.sells, `${tx.buys != null ? fmtInt(tx.buys) : '—'} buys`, `${tx.sells != null ? fmtInt(tx.sells) : '—'} sells`)}
+    ${ptx.buyers != null ? bar2(ptx.buyers, ptx.sellers, `${fmtInt(ptx.buyers)} buyers`, `${fmtInt(ptx.sellers)} sellers`) : ''}`;
+
+  // Pool information
+  const liq = pair.liquidity || {};
+  const quote = pair.quoteToken?.symbol || 'SOL';
+  const dexName = { pumpfun: 'Pump.fun curve', pumpswap: 'PumpSwap', raydium: 'Raydium', meteora: 'Meteora', orca: 'Orca' }[String(t.dexId || pair.dexId || '').toLowerCase()] || (t.dexId || pair.dexId || '—');
+  const lp = info.launchpad_details;
+  const ath = athOf(addr);
+  const mc = t.marketCap || 0;
+  const socials = [
+    ...(info.websites || []).slice(0, 2).map((u) => [u.replace(/^https?:\/\//, '').replace(/\/$/, '').slice(0, 28), u]),
+    info.twitter_handle ? ['X / Twitter', `https://x.com/${info.twitter_handle}`] : null,
+    info.telegram_handle ? ['Telegram', `https://t.me/${info.telegram_handle}`] : null,
+  ].filter(Boolean).filter(([, u]) => /^https:\/\//.test(u));
+  $('#poolCard').innerHTML = `<div class="sec-h"><span>Pool information</span><span class="tag">Paired with ${esc(quote)}</span></div>
+    <div class="kv"><span>Total liquidity</span><b>${liq.usd ? fmtUsd(liq.usd, { compact: true }) : '—'}${liq.quote ? ` <small class="muted">(${fmtInt(Math.round(liq.quote))} ${esc(quote)})</small>` : ''}</b></div>
+    <div class="kv"><span>Exchange</span><b>${esc(dexName)}</b></div>
+    ${t.pairAddress ? `<div class="kv"><span>Pool</span><a href="${solscan(t.pairAddress)}" target="_blank" rel="noopener" class="mono">${esc(shortAddr(t.pairAddress))} ↗</a></div>` : ''}
+    ${info.developer_address ? `<div class="kv"><span>Creator</span><a href="${solscan(info.developer_address)}" target="_blank" rel="noopener" class="mono">${esc(shortAddr(info.developer_address))} ↗</a></div>` : ''}
+    ${t.createdAt ? `<div class="kv"><span>Created</span><b>${ago(t.createdAt)} ago</b></div>` : ''}
+    ${lp && !lp.completed ? `<div class="kv"><span>Bonding curve</span><b>${Number(lp.graduation_percentage || 0).toFixed(1)}%</b></div><div class="prog"><span style="width:${Math.min(100, Number(lp.graduation_percentage || 0))}%"></span></div>` : ''}
+    ${ath ? `<div class="kv"><span>MC ${fmtUsd(mc, { compact: true })}</span><span class="muted">ATH ${fmtUsd(ath, { compact: true })}</span></div><div class="prog"><span style="width:${Math.min(100, (mc / ath) * 100)}%"></span></div>` : ''}
+    ${info.description ? `<div class="desc">${esc(String(info.description).slice(0, 400))}</div>` : ''}
+    ${socials.length ? `<div class="socials">${socials.map(([k, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener nofollow">${esc(k)} ↗</a>`).join('')}</div>` : ''}
+    ${info.mint_authority ? `<div class="kv small"><span>Mint authority</span><b class="${info.mint_authority === 'no' ? 'up' : 'down'}">${info.mint_authority === 'no' ? 'Revoked' : 'Active'}</b></div>` : ''}`;
+}
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-stats-tf]');
+  if (b) { S.statsTf = b.dataset.statsTf; renderSidePanels(); return; }
+  const g = e.target.closest('[data-goto-tab]');
+  if (g) { $(`.ctab[data-tape="${g.dataset.gotoTab}"]`)?.click(); $('.tape')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+});
+
+function renderHoldersPane() {
+  const addr = S.selected;
+  const info = S.info.get(addr) || {};
+  const h = info.holders;
+  const list = holderLists.get(addr);
+  const t = S.tokens.get(addr) || {};
+  const supply = supplyOf(t);
+  let rows = '';
+  if (list?.holders?.length) {
+    rows = `<div class="tbl-head h5"><span>#</span><span>Holder</span><span class="r">Amount</span><span class="r">% supply</span><span class="r">Value</span></div>` +
+      list.holders.map((x, i) => {
+        const label = x.owner === t.pairAddress ? '<span class="tag">Liquidity pool</span>' : x.owner === info.developer_address ? '<span class="tag dev">Dev</span>' : '';
+        return `<div class="tbl-row h5"><span class="muted">${i + 1}</span><span><a class="mono" href="${solscan(x.owner)}" target="_blank" rel="noopener">${esc(shortAddr(x.owner))}</a> ${label}</span>
+          <span class="r mono">${fmtQty(x.amount)}</span><span class="r mono">${x.pct.toFixed(2)}%</span><span class="r mono">${fmtUsd(x.amount * (t.priceUsd || 0), { compact: true })}</span></div>`;
+      }).join('');
+  } else {
+    rows = `<div class="tape-empty">The full list of holder wallets needs a Solana data key on the server, so it isn't shown here yet.<br>
+      The count and split above are live. <b>Top traders</b> shows who's buying and selling right now.</div>`;
+  }
+  const dist = h?.distribution_percentage || {};
+  $('#holdersPane').innerHTML = `<div class="pane-sum">
+      <div><span class="k">Holders</span><b>${h?.count ? fmtInt(h.count) : '—'}</b></div>
+      <div><span class="k">Top 10 hold</span><b>${dist.top_10 != null ? Number(dist.top_10).toFixed(1) + '%' : '—'}</b></div>
+      <div><span class="k">Dev holds</span><b>${info.developer_holding_percentage != null ? Number(info.developer_holding_percentage).toFixed(2) + '%' : '—'}</b></div>
+      <div><span class="k">Supply</span><b>${supply ? fmtQty(supply) : '—'}</b></div>
+    </div>${rows}`;
+}
+
+// Wallets trading this coin right now, from the on-chain trades this page has seen.
+function renderTraders() {
+  const t = S.tokens.get(S.selected) || {};
+  const by = new Map();
+  for (const x of S.trades) {
+    if (!x.trader) continue;
+    const w = by.get(x.trader) || { trader: x.trader, bought: 0, sold: 0, qty: 0, n: 0, last: 0 };
+    if (x.side === 'buy') { w.bought += x.usd; w.qty += x.qty || 0; } else { w.sold += x.usd; w.qty -= x.qty || 0; }
+    w.n++; w.last = Math.max(w.last, x.ts);
+    by.set(x.trader, w);
+  }
+  const list = [...by.values()].map((w) => ({ ...w, pnl: w.sold - w.bought + Math.max(0, w.qty) * (t.priceUsd || 0) }))
+    .sort((a, b) => (b.bought + b.sold) - (a.bought + a.sold)).slice(0, 50);
+  const span = S.trades.length ? ago(S.trades[0].ts) : '';
+  $('#tradersPane').innerHTML = list.length ? `<div class="pane-note muted small">From the last ${fmtInt(S.trades.length)} on-chain trades (${span}). PnL = sold + still held − bought, within that window.</div>
+    <div class="tbl-head h6"><span>Trader</span><span class="r">Bought</span><span class="r">Sold</span><span class="r">PnL</span><span class="r">Trades</span><span class="r">Last</span></div>` +
+    list.map((w) => `<div class="tbl-row h6"><a class="mono" href="${solscan(w.trader)}" target="_blank" rel="noopener">${esc(shortAddr(w.trader))}</a>
+      <span class="r mono up">${fmtUsd(w.bought, { compact: true })}</span><span class="r mono down">${fmtUsd(w.sold, { compact: true })}</span>
+      <span class="r mono ${cls(w.pnl)}">${fmtUsd(w.pnl, { sign: true, compact: true })}</span><span class="r mono">${w.n}</span><span class="r muted">${ago(w.last)}</span></div>`).join('')
+    : `<div class="tape-empty">Waiting for on-chain trades…</div>`;
+}
 
 // ================= ticker =================
 function renderTicker(fresh) {
   const items = [];
-  for (const f of S.feed.slice(0, 14)) {
-    const buy = f.side === 'buy';
-    items.push(`<span class="tk ${buy ? 'tk-buy' : 'tk-sell'}"><b>${esc(f.username)}</b> ${buy ? 'bought' : 'sold'} ${fmtUsd(f.usd_value, { compact: true })} of <b>${esc(f.symbol)}</b>${!buy && f.pnl_pct != null ? ` <span class="${cls(f.pnl_pct)}">${fmtPct(f.pnl_pct, 0)}</span>` : ''}</span>`);
-  }
-  for (const t of S.trending.map((a) => S.tokens.get(a)).filter(Boolean).slice(0, 12)) {
+  for (const t of S.trending.map((a) => S.tokens.get(a)).filter(Boolean).slice(0, 20)) {
     items.push(`<a class="tk" href="#coin/${esc(t.address)}">${coinImg(t, 'coin-img xs')}<b>${esc(t.symbol)}</b> ${fmtUsd(t.marketCap, { compact: true })} <span class="${cls(t.change5m)}">${fmtPct(t.change5m, 1)}</span></a>`);
   }
   if (!items.length) return;
   const inner = $('#ticker');
   inner.innerHTML = items.join('') + items.join('');
-  if (fresh) inner.firstElementChild?.classList.add('new');
 }
 
 // ================= leaderboard =================
@@ -1197,7 +1432,7 @@ async function loadLeaderboard() {
     const d = await api(`/api/leaderboard?range=${S.lbRange}`);
     const rows = $('#lbRows');
     const row = (r, extra = '') => `<div class="lb-row ${r.rank <= 3 ? 'top' + r.rank : ''} ${r.isMe ? 'me' : ''}" role="row">
-        <span class="lb-rank" role="cell">${r.rank === 1 ? '👑' : '#' + r.rank}</span>
+        <span class="lb-rank" role="cell">#${r.rank}</span>
         <span class="lb-name" role="cell"><button class="lb-player" data-player="${esc(r.username)}" title="View profile">${avatarHtml(r)}<span class="nm">${esc(r.username)}${esc(extra)}</span></button>${r.isMe ? '<span class="you-tag">YOU</span>' : ''}${badgeIcons(r.badges)}</span>
         <span class="lb-pnl r ${cls(r.profit)}" role="cell">${fmtUsd(r.profit, { sign: true })}</span>
         <span class="r hide-sm ${cls(r.profitPct)}" role="cell">${fmtPct(r.profitPct, 1)}</span>
@@ -1262,7 +1497,7 @@ async function onBadge({ badge, detail }) {
 async function renderProfile() {
   const root = $('#profile');
   if (!S.user) {
-    root.innerHTML = `<div class="guest card"><div class="big-glyph">◉</div><h2>Paper trade real memecoins</h2>
+    root.innerHTML = `<div class="guest card"><h2>Paper trading on live Solana markets</h2>
       <p class="muted">Start with $1,000 in mock USD. Real live prices. Zero real money.</p>
       <button class="exec buy" style="max-width:280px;width:100%" data-auth="signup">Create free account</button>
       <p><button class="link-btn" data-auth="login">I already have one</button></p></div>`;
@@ -1677,7 +1912,7 @@ $('#authForm').addEventListener('submit', async (e) => {
     f.reset();
     closeAuth();
     await refreshMe();
-    toast(authMode === 'signup' ? `<b>Wallet funded</b> · $1,000 mock USD is ready. Go get that bag 🚀` : `<b>Logged in</b> · welcome back, ${esc(S.user.username)}`);
+    toast(authMode === 'signup' ? `<b>Account created</b> · $1,000 in paper USD is in your wallet.` : `<b>Logged in</b> · welcome back, ${esc(S.user.username)}`);
     if (S.selected) loadMyTokenTrades();
   } catch (err) { $('#authErr').textContent = err.message; }
   finally { btn.disabled = false; }
