@@ -81,9 +81,14 @@
               </div>
             </div>
 
-            <div class="chart-card card">
+            <div class="chart-card card" id="chartCard" data-cview="live">
               <div class="chart-bar">
-                <div class="tfs" role="group" aria-label="Candle size">
+                <div class="cview-toggle" role="group" aria-label="Chart type">
+                  <button class="cview" data-cview="live" aria-pressed="true" title="Real-time TradingView chart">Live chart</button>
+                  <button class="cview" data-cview="mine" aria-pressed="false" title="Shows your entry price and your buys/sells">My trades view</button>
+                </div>
+                <span class="bar-sep mine-only" aria-hidden="true"></span>
+                <div class="tfs mine-only" role="group" aria-label="Candle size">
                   <button class="tf" data-tf="1" aria-pressed="true">1s</button>
                   <button class="tf" data-tf="15" aria-pressed="false">15s</button>
                   <button class="tf" data-tf="60" aria-pressed="false">1m</button>
@@ -93,14 +98,16 @@
                   <button class="tf" data-tf="14400" aria-pressed="false">4h</button>
                   <button class="tf" data-tf="86400" aria-pressed="false">D</button>
                 </div>
-                <span class="bar-sep" aria-hidden="true"></span>
-                <div class="scale-toggle" role="group" aria-label="Show price or market cap">
+                <span class="bar-sep mine-only" aria-hidden="true"></span>
+                <div class="scale-toggle mine-only" role="group" aria-label="Show price or market cap">
                   <button class="scale" data-scale="price" aria-pressed="false">Price</button><span class="muted">/</span><button class="scale" data-scale="mcap" aria-pressed="true">MCap</button>
                 </div>
-                <span class="chart-hint" id="chartHint"><span class="live-pip" aria-hidden="true"></span>Live on-chain trades</span>
-                <button class="icon-btn" id="resetView" title="Jump to latest">⟲</button>
+                <span class="chart-hint mine-only" id="chartHint"><span class="live-pip" aria-hidden="true"></span>Live on-chain trades</span>
+                <button class="icon-btn mine-only" id="resetView" title="Jump to latest">⟲</button>
+                <span class="chart-hint live-only">Live · GeckoTerminal</span>
               </div>
-              <div class="chart-wrap" id="chartWrap"></div>
+              <div class="chart-wrap mine-only" id="chartWrap"></div>
+              <div class="embed-wrap live-only" id="embedWrap"></div>
             </div>
 
             <div class="tape card">
@@ -266,6 +273,24 @@
       <div class="auth-err" id="peErr" role="alert"></div>
       <button class="exec buy" type="submit" id="peSave">Save profile</button>
     </form>
+  </div>
+
+  <!-- Restart account -->
+  <div class="modal" id="resetModal" data-modal hidden role="dialog" aria-modal="true" aria-labelledby="resetTitle">
+    <div class="sheet-card card">
+      <button type="button" class="modal-x" data-close aria-label="Close">✕</button>
+      <h2 id="resetTitle">Restart your account?</h2>
+      <p class="auth-sub">You'll start fresh with <b>$1,000</b> in paper USD.</p>
+      <ul class="reset-list">
+        <li>All coins you hold are removed</li>
+        <li>Trade history, daily PnL and leaderboard stats are cleared</li>
+        <li>Added funds and badges are cleared</li>
+        <li>Your name, picture, bio and watchlist stay</li>
+      </ul>
+      <div class="auth-err" id="resetErr"></div>
+      <button class="exec sell" type="button" id="resetConfirm">Restart with $1,000</button>
+      <button class="link-btn" type="button" data-close style="align-self:center">Cancel</button>
+    </div>
   </div>
 
   <!-- Someone else's profile -->
