@@ -122,6 +122,8 @@ const S = {
   calMonth: (() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); })(),
   lastPnl: new Map(),
   myTokenTrades: [],
+  tapeSeen: new Set(),
+  lastTapeAt: 0,
 };
 let chart = null;
 let es = null;
@@ -139,6 +141,9 @@ function connectStream() {
     for (const t of d.tokens) S.tokens.set(t.address, { ...S.tokens.get(t.address), ...t });
     renderCoinList();
     renderTicker();
+    if (d.mode === 'live' && String(S.selected || '').startsWith('DEMO') && S.trending.length && S.view === 'trending') {
+      location.replace(`#coin/${S.trending[0]}`);
+    }
   });
   es.addEventListener('prices', (e) => onPrices(JSON.parse(e.data)));
   es.addEventListener('tape', (e) => {
@@ -340,6 +345,8 @@ async function selectToken(addr) {
   if (changed) {
     chart.setData([]);
     $('#tapeRows').innerHTML = `<div class="tape-empty">Listening for on-chain trades…</div>`;
+    S.tapeSeen = new Set();
+    S.lastTapeAt = 0;
     connectStream();
     loadCandles();
     loadMyTokenTrades();
@@ -355,9 +362,15 @@ async function selectToken(addr) {
 async function loadCandles() {
   const addr = S.selected;
   try {
-    const candles = await api(`/api/candles/${addr}?tf=${S.tf}`);
+    let candles = await api(`/api/candles/${addr}?tf=${S.tf}`);
     if (addr !== S.selected) return;
     chart.setData(candles);
+    if (candles.length < 60) {
+      const hist = await browserHistory(addr, S.tf).catch(() => []);
+      if (addr !== S.selected || !hist.length) return;
+      const firstLive = chart.data.length ? chart.data[0].time : Infinity;
+      chart.setData(hist.filter((c) => c.time < firstLive).concat(chart.data));
+    }
   } catch { /* stays empty until ticks arrive */ }
 }
 async function loadMyTokenTrades() {
@@ -420,6 +433,9 @@ $('#backBtn').addEventListener('click', () => { location.hash = 'trending'; });
 
 // ---------- tape ----------
 function addTape(trades, fresh) {
+  trades = trades.filter((t) => { const id = t.id || `${t.ts}${t.usd}`; if (S.tapeSeen.has(id)) return false; S.tapeSeen.add(id); return true; });
+  if (!trades.length) return;
+  S.lastTapeAt = Date.now();
   const box = $('#tapeRows');
   if (box.querySelector('.tape-empty')) box.innerHTML = '';
   const html = trades.slice().reverse().map((t) => {
@@ -704,6 +720,94 @@ $('#posHandle').addEventListener('click', () => ($('#posTab').classList.contains
 $('#posClose').addEventListener('click', closePositions);
 $('#myPosStrip').addEventListener('click', () => openPositions());
 $('#posTab').addEventListener('pointerdown', () => clearTimeout(openPositions.t));
+
+// ================= player-powered prices =================
+// If the server is being rate-limited by the price sites, this browser fetches the same public data
+// (from its own internet address) and hands it to the server. The server says when it needs help.
+const DEX = 'https://api.dexscreener.com';
+const GT = 'https://api.geckoterminal.com/api/v2';
+const getJ = async (url) => { const r = await fetch(url, { headers: { accept: 'application/json' } }); if (!r.ok) throw new Error(String(r.status)); return r.json(); };
+const slimPair = (p) => ({
+  chainId: p.chainId, dexId: p.dexId, pairAddress: p.pairAddress,
+  baseToken: { address: p.baseToken?.address, name: p.baseToken?.name, symbol: p.baseToken?.symbol },
+  priceUsd: p.priceUsd, priceChange: { m5: p.priceChange?.m5, h1: p.priceChange?.h1, h24: p.priceChange?.h24 },
+  volume: { h24: p.volume?.h24 }, liquidity: { usd: p.liquidity?.usd }, marketCap: p.marketCap, fdv: p.fdv,
+  txns: { m5: p.txns?.m5 }, pairCreatedAt: p.pairCreatedAt, info: { imageUrl: p.info?.imageUrl },
+});
+let relayBusy = false;
+let lastListsFetch = 0;
+async function relayTick() {
+  if (relayBusy || document.hidden) return;
+  relayBusy = true;
+  try {
+    const plan = await api('/api/relay/plan');
+    if (!plan.want) return;
+    const body = {};
+    let addrs = plan.addresses || [];
+    if (plan.needLists && Date.now() - lastListsFetch > 55_000) {
+      lastListsFetch = Date.now();
+      const [gt, top, latest, prof] = await Promise.allSettled([
+        getJ(`${GT}/networks/solana/trending_pools?include=base_token&page=1`),
+        getJ(`${DEX}/token-boosts/top/v1`), getJ(`${DEX}/token-boosts/latest/v1`), getJ(`${DEX}/token-profiles/latest/v1`),
+      ]);
+      const cand = []; const seen = new Set(); const pools = {};
+      const add = (a) => { if (a && !seen.has(a)) { seen.add(a); cand.push(a); } };
+      if (gt.status === 'fulfilled') {
+        const inc = new Map((gt.value.included || []).map((x) => [x.id, x.attributes || {}]));
+        for (const pool of gt.value.data || []) {
+          const id = pool.relationships?.base_token?.data?.id;
+          const a = inc.get(id)?.address || (id || '').replace(/^solana_/, '');
+          if (a) { add(a); if (pool.attributes?.address) pools[a] = pool.attributes.address; }
+        }
+      }
+      for (const l of [top, latest, prof]) if (l.status === 'fulfilled' && Array.isArray(l.value)) for (const b of l.value) if (b?.chainId === 'solana') add(b.tokenAddress);
+      cand.sort((a, b) => b.endsWith('pump') - a.endsWith('pump'));
+      body.lists = cand.slice(0, 90);
+      body.pools = pools;
+      addrs = [...new Set([...addrs, ...body.lists])];
+    }
+    const pairs = [];
+    for (let i = 0; i < addrs.length; i += 30) {
+      const r = await getJ(`${DEX}/tokens/v1/solana/${addrs.slice(i, i + 30).join(',')}`).catch(() => null);
+      if (Array.isArray(r)) pairs.push(...r.map(slimPair));
+    }
+    if (pairs.length) { body.pairs = pairs; await api('/api/relay', body); }
+  } catch { /* try again next tick */ } finally { relayBusy = false; }
+}
+setInterval(relayTick, 3000);
+
+// Chart history straight from GeckoTerminal (one request when you open a coin).
+async function browserHistory(addr, tf) {
+  const t = S.tokens.get(addr);
+  if (!t?.pairAddress || String(addr).startsWith('DEMO')) return [];
+  const [unit, agg] = tf >= 60 ? ['hour', Math.max(1, Math.round(tf / 60))] : ['minute', tf];
+  const j = await getJ(`${GT}/networks/solana/pools/${t.pairAddress}/ohlcv/${unit}?aggregate=${agg}&limit=500&currency=usd&token=base`);
+  return (j?.data?.attributes?.ohlcv_list || [])
+    .map(([ts, o, h, l, c, v]) => ({ time: Math.floor(ts / (tf * 60)) * tf * 60, open: +o, high: +h, low: +l, close: +c, volume: +v || 0 }))
+    .filter((c) => c.open > 0 && c.close > 0)
+    .sort((a, b) => a.time - b.time);
+}
+
+// Live on-chain trades for the open coin, if the server's feed is quiet.
+let tapeBusy = false;
+setInterval(async () => {
+  const addr = S.selected;
+  const t = S.tokens.get(addr);
+  if (tapeBusy || document.hidden || !t?.pairAddress || String(addr).startsWith('DEMO') || Date.now() - S.lastTapeAt < 15_000) return;
+  tapeBusy = true;
+  try {
+    const j = await getJ(`${GT}/networks/solana/pools/${t.pairAddress}/trades`);
+    if (addr !== S.selected) return;
+    const trades = (j.data || []).map((row) => {
+      const a = row.attributes || {};
+      const w = a.tx_from_address || '';
+      return { id: a.tx_hash || row.id, side: a.kind === 'sell' ? 'sell' : 'buy', usd: Number(a.volume_in_usd) || 0,
+        wallet: w ? `${w.slice(0, 4)}…${w.slice(-4)}` : '', ts: a.block_timestamp ? Date.parse(a.block_timestamp) : Date.now() };
+    }).sort((x, y) => x.ts - y.ts).slice(-40);
+    addTape(trades, S.lastTapeAt > 0);
+    S.lastTapeAt = Date.now() - 5_000; // poll again in ~10s unless the server feed delivers
+  } catch { /* GeckoTerminal busy; try again later */ } finally { tapeBusy = false; }
+}, 5000);
 
 // ================= ticker =================
 function renderTicker(fresh) {
