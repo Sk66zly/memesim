@@ -8,7 +8,7 @@
 //   3. finishes copying before the server shuts down.
 // Each copy sends the row's full current values ("upsert"), so retrying after a network hiccup is
 // always safe: sending the same row twice gives the same result.
-const { db, SCHEMA, TABLES } = require('./db');
+const { db, SCHEMA, TABLES, ADDED_COLUMNS } = require('./db');
 
 const RAW_URL = (process.env.TURSO_DATABASE_URL || '').trim();
 const TOKEN = (process.env.TURSO_AUTH_TOKEN || '').trim();
@@ -173,6 +173,12 @@ async function restore() {
   const remoteSchema = SCHEMA.replace(/\s+REFERENCES\s+\w+\(\w+\)(\s+ON DELETE CASCADE)?/gi, '');
   const ddl = remoteSchema.split(';').map((s) => s.trim()).filter(Boolean).map((sql) => ({ sql }));
   await pipeline(ddl);
+  // Bring older Turso copies up to date with columns added later (skips ones already there).
+  const remoteCols = await pipeline(ADDED_COLUMNS.map(([t]) => ({ sql: `PRAGMA table_info(${t})` })));
+  for (let i = 0; i < ADDED_COLUMNS.length; i++) {
+    const [t, col, type] = ADDED_COLUMNS[i];
+    if (!remoteCols[i].some((r) => r.name === col)) await pipeline([{ sql: `ALTER TABLE ${t} ADD COLUMN ${col} ${type}` }]);
+  }
 
   // If this machine still has unsent changes from last time (e.g. a PC restart), send them first.
   if (pending()) { log(`Cloud save: sending ${pending()} changes left from last run…`); let n; do { n = await pushChanges(); } while (n); }
