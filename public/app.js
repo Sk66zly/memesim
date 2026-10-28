@@ -135,6 +135,7 @@ const S = {
   pool: new Map(),    // address -> GeckoTerminal pool stats
   statsTf: 'h24',
   tape: 'live',
+  cview: (() => { try { return localStorage.getItem('memesim.cview') || 'live'; } catch { return 'live'; } })(),
 };
 let chart = null;
 let es = null;
@@ -489,6 +490,7 @@ async function selectToken(addr) {
   }
   updateLegend();
   renderSidePanels();
+  setChartView(S.cview);
   applyChartScale();
   updateChartLines();
   renderPositions();
@@ -612,6 +614,7 @@ function renderTermHead() {
   $('#tokAth').textContent = ath ? fmtUsd(ath, { compact: true }) : '—';
   document.title = `${t.symbol} ${fmtUsd(t.marketCap, { compact: true })} · MemeSim`;
   updateWatchBtn();
+  renderEmbed();
 }
 function setFlash(el, text, n) {
   if (el.textContent === text) return;
@@ -645,6 +648,32 @@ function updateChartLines() {
   const p = S.user?.positions.find((x) => x.address === S.selected);
   chart.setLines(p ? [{ price: p.avgEntry, label: 'Your entry', color: '#7dd3fc' }] : []);
 }
+
+// ---- chart type: embedded real-time chart (default) or our own chart with your entry + trades ----
+function setChartView(v) {
+  S.cview = v === 'mine' ? 'mine' : 'live';
+  try { localStorage.setItem('memesim.cview', S.cview); } catch { /* private mode */ }
+  $('#chartCard').dataset.cview = S.cview;
+  $$('.cview').forEach((b) => b.setAttribute('aria-pressed', b.dataset.cview === S.cview));
+  if (S.cview === 'live') renderEmbed(); else chart?.resize();
+}
+function renderEmbed() {
+  const box = $('#embedWrap');
+  const t = S.tokens.get(S.selected);
+  if (!box || !t || S.cview !== 'live') return;
+  const pool = t.pairAddress;
+  let src = '';
+  if (pool && !String(t.address).startsWith('DEMO')) {
+    src = `https://www.geckoterminal.com/solana/pools/${encodeURIComponent(pool)}?embed=1&info=0&swaps=0&light_chart=0&chart_type=market_cap&resolution=1s`;
+  }
+  if (box.dataset.src === src && box.firstElementChild) return;
+  box.dataset.src = src;
+  box.innerHTML = src
+    ? `<iframe src="${esc(src)}" title="Live chart for ${esc(t.symbol || '')}" allow="clipboard-write" referrerpolicy="strict-origin-when-cross-origin"></iframe>`
+    : `<div class="embed-empty">${String(t.address).startsWith('DEMO') ? 'Demo coins only have the My trades view.' : 'Finding this coin\'s pool…'}<br><button class="link-btn" data-cview="mine">Open My trades view</button></div>`;
+}
+$$('.cview').forEach((b) => b.addEventListener('click', () => setChartView(b.dataset.cview)));
+document.addEventListener('click', (e) => { const b = e.target.closest('.embed-empty [data-cview]'); if (b) setChartView(b.dataset.cview); });
 
 $$('.tf').forEach((b) => b.addEventListener('click', () => {
   S.tf = Number(b.dataset.tf);
@@ -1603,6 +1632,7 @@ async function renderProfile() {
         <div class="pf-actions">
           <button class="btn-ghost" id="editProfileBtn">✎ Edit profile</button>
           <button class="btn-ghost" data-player="${esc(u.username)}">👁 Public view</button>
+          <button class="btn-ghost" id="resetBtn">↺ Restart account</button>
           <button class="btn-ghost" id="logoutBtn">Log out</button>
         </div>
       </div>
@@ -1635,6 +1665,7 @@ async function renderProfile() {
         <div style="overflow-x:auto"><table class="trades-table" id="tradesTable"></table></div>
       </div>`;
     $('#logoutBtn').addEventListener('click', logout);
+    $('#resetBtn').addEventListener('click', () => { $('#resetErr').textContent = ''; openModal('#resetModal'); });
     $('#pfFaucet').addEventListener('click', claimFaucet);
     $('#pfAddFunds').addEventListener('click', () => openFunds());
     $('#editProfileBtn').addEventListener('click', openProfileEdit);
@@ -1820,6 +1851,21 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $$('.modal
 
 // ---- add funds ----
 let fundsCur = 'USD';
+$('#resetConfirm').addEventListener('click', async () => {
+  const b = $('#resetConfirm');
+  b.disabled = true;
+  try {
+    const r = await api('/api/reset', { confirm: 'RESET' });
+    S.user = r.user;
+    S.myTokenTrades = [];
+    S.snapshots = [];
+    closeModal($('#resetModal'));
+    renderAcct(); renderPositions(); renderHomeSide(); updateChartLines(); updateEstimate(); renderMyTrades();
+    if (S.view === 'profile') renderProfile();
+    toast('<b>Account restarted</b> · you have $1,000 in paper USD.', 'info', 4000);
+  } catch (e) { $('#resetErr').textContent = e.message; } finally { b.disabled = false; }
+});
+
 function openFunds() {
   if (!S.user) return openAuth('signup');
   openModal('#fundsModal');
