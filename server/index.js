@@ -69,7 +69,7 @@ function serveStatic(req, res, pathname) {
     'cache-control': ext === '.html' || file.endsWith('sw.js') ? 'no-cache' : 'public, max-age=3600',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'same-origin',
-    ...(ext === '.html' ? { 'content-security-policy': "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'" } : {}),
+    ...(ext === '.html' ? { 'content-security-policy': "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com; frame-ancestors 'none'" } : {}),
   });
   fs.createReadStream(file).pipe(res);
 }
@@ -130,6 +130,11 @@ async function api(req, res, url) {
   }
 
   if (p === '/api/market' && m === 'GET') return send(res, 200, market.snapshot());
+  if (p === '/api/relay/plan' && m === 'GET') return send(res, 200, market.relayPlan());
+  if (p === '/api/relay' && m === 'POST') {
+    if (!rateLimit(`relay:${ip(req)}`, 40, 60_000)) throw new game.GameError('Too many price reports.', 429);
+    return send(res, 200, market.ingestRelay(await readBody(req, 3_000_000)));
+  }
   if (p === '/api/health' && m === 'GET') {
     const s = cloud.status;
     return send(res, 200, { ok: true, market: market.mode, cloudSave: s.enabled ? { on: true, pending: s.pending, lastSyncAt: s.lastSyncAt, error: s.lastError } : { on: false } });
