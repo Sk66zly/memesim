@@ -281,7 +281,7 @@ function renderCoinList() {
       <span class="rank">${i + 1}</span>
       ${coinImg(t)}
       <span class="coin-main">
-        <span class="coin-sym">${esc(t.symbol)}${held.has(t.address) ? '<span class="held-dot">HELD</span>' : ''}</span>
+        <span class="coin-sym">${esc(t.symbol)}${t.isPump ? '<span class="pump-tag" title="Launched on Pump.fun">PUMP</span>' : ''}${held.has(t.address) ? '<span class="held-dot">HELD</span>' : ''}</span>
         <span class="coin-sub">MC ${fmtUsd(t.marketCap, { compact: true })} · V ${fmtUsd(t.volume24h, { compact: true })}</span>
       </span>
       <span class="coin-right">
@@ -372,7 +372,9 @@ function renderTermHead() {
   if (t.image) { img.src = t.image; img.style.display = ''; img.referrerPolicy = 'no-referrer'; img.onerror = () => { img.style.display = 'none'; }; }
   else img.style.display = 'none';
   $('#tokSym').textContent = '$' + (t.symbol || '?');
-  $('#tokName').textContent = t.name || '';
+  const isDemo = String(t.address).startsWith('DEMO');
+  $('#tokName').innerHTML = `${esc(t.name || '')}${t.isPump ? ' <span class="pump-tag">PUMP.FUN</span>' : ''}${isDemo ? '' : `
+    <span class="ext-links">${t.isPump ? `<a href="https://pump.fun/coin/${encodeURIComponent(t.address)}" target="_blank" rel="noopener">pump.fun ↗</a>` : ''}<a href="https://dexscreener.com/solana/${encodeURIComponent(t.pairAddress || t.address)}" target="_blank" rel="noopener">dexscreener ↗</a></span>`}`;
   $('#tokPrice').textContent = fmtPrice(t.priceUsd);
   $('#tokChg').innerHTML = [['5m', t.change5m], ['1h', t.change1h], ['24h', t.change24h]]
     .map(([k, v]) => `<span class="${cls(v)}">${k} ${fmtPct(v, 1)}</span>`).join('');
