@@ -1,0 +1,469 @@
+// Live market data: trending Solana memecoins, real-time prices, candles and on-chain trade tape.
+//  - GeckoTerminal: which pools are trending, historical 1m candles, recent on-chain trades
+//  - DexScreener:   fast live prices for every tracked token (batched 30 per request)
+// If the live APIs can't be reached (or MOCK_MARKET=1), it falls back to a clearly-labelled demo market.
+const { EventEmitter } = require('node:events');
+const { db } = require('./db');
+
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
+const EXCLUDE = new Set([
+  SOL_MINT,
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',  // mSOL
+  'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn', // JitoSOL
+  'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij',  // cbBTC
+  '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', // WBTC
+  '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', // WETH
+]);
+
+const CFG = {
+  mock: process.env.MOCK_MARKET === '1',
+  trendingCount: Number(process.env.TRENDING_COUNT || 20),
+  pricePollMs: Number(process.env.PRICE_POLL_MS || 2500),
+  trendingRefreshMs: 120_000,
+  maxCandles: 1500, // 1-minute candles kept per token (~25h)
+};
+
+const GECKO = 'https://api.geckoterminal.com/api/v2';
+const DEX = 'https://api.dexscreener.com';
+
+const events = new EventEmitter();
+events.setMaxListeners(0);
+
+const state = {
+  mode: CFG.mock ? 'demo' : 'starting', // 'live' | 'demo' | 'starting'
+  solPrice: 0,
+  solUpdatedAt: 0,
+  tokens: new Map(),   // address -> token info
+  trending: [],        // ordered addresses
+  candles: new Map(),  // address -> [{time, open, high, low, close, volume}] 1m, ascending
+  historyLoadedAt: new Map(),
+  tape: new Map(),     // address -> recent on-chain trades (newest first)
+  seenTx: new Map(),   // address -> Set of tx hashes
+  watchers: new Map(), // address -> count of viewers on that token
+  liveFailures: 0,
+};
+
+// ---------- HTTP helpers ----------
+async function getJSON(url) {
+  const res = await fetch(url, {
+    headers: { accept: 'application/json', 'user-agent': 'MemeSim/1.0 (paper trading game)' },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`${res.status} from ${new URL(url).host}`);
+  return res.json();
+}
+
+// GeckoTerminal allows ~30 requests/min on the free tier, so every call goes through this queue.
+const geckoQueue = [];
+let geckoBusy = false;
+function gecko(path) {
+  return new Promise((resolve, reject) => {
+    geckoQueue.push({ path, resolve, reject });
+    pumpGecko();
+  });
+}
+async function pumpGecko() {
+  if (geckoBusy) return;
+  geckoBusy = true;
+  while (geckoQueue.length) {
+    const job = geckoQueue.shift();
+    try { job.resolve(await getJSON(GECKO + job.path)); } catch (e) { job.reject(e); }
+    await sleep(2200);
+  }
+  geckoBusy = false;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+
+// ---------- token bookkeeping ----------
+function upsertToken(t) {
+  const prev = state.tokens.get(t.address) || {};
+  const merged = { ...prev, ...Object.fromEntries(Object.entries(t).filter(([, v]) => v !== undefined && v !== null)) };
+  state.tokens.set(t.address, merged);
+  return merged;
+}
+
+const saveTokenStmt = db.prepare(`
+  INSERT INTO tokens (address, symbol, name, image, pair_address, last_price, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(address) DO UPDATE SET symbol=excluded.symbol, name=excluded.name,
+    image=COALESCE(excluded.image, tokens.image), pair_address=COALESCE(excluded.pair_address, tokens.pair_address),
+    last_price=excluded.last_price, updated_at=excluded.updated_at`);
+function persistToken(t) {
+  if (!t || !t.priceUsd) return;
+  saveTokenStmt.run(t.address, t.symbol || '?', t.name || '', t.image || null, t.pairAddress || null, t.priceUsd, t.updatedAt || Date.now());
+}
+
+// Load tokens players hold from the DB so their prices keep updating after they leave the trending list.
+function heldTokenAddresses() {
+  return db.prepare('SELECT DISTINCT token FROM positions WHERE qty > 0').all().map((r) => r.token);
+}
+function hydrateFromDb() {
+  for (const r of db.prepare('SELECT * FROM tokens').all()) {
+    if (!state.tokens.has(r.address)) {
+      state.tokens.set(r.address, {
+        address: r.address, symbol: r.symbol, name: r.name, image: r.image,
+        pairAddress: r.pair_address, priceUsd: r.last_price, updatedAt: r.updated_at,
+      });
+    }
+  }
+}
+
+// ---------- candles ----------
+function pushPriceToCandles(address, price, ts = Date.now(), volume = 0) {
+  if (!price) return;
+  const minute = Math.floor(ts / 60_000) * 60;
+  let arr = state.candles.get(address);
+  if (!arr) { arr = []; state.candles.set(address, arr); }
+  const last = arr[arr.length - 1];
+  if (last && last.time === minute) {
+    last.high = Math.max(last.high, price);
+    last.low = Math.min(last.low, price);
+    last.close = price;
+    last.volume += volume;
+  } else if (!last || minute > last.time) {
+    const open = last ? last.close : price;
+    arr.push({ time: minute, open, high: Math.max(open, price), low: Math.min(open, price), close: price, volume });
+    if (arr.length > CFG.maxCandles) arr.splice(0, arr.length - CFG.maxCandles);
+  }
+}
+
+function aggregate(candles, minutes) {
+  if (minutes <= 1) return candles;
+  const out = [];
+  const step = minutes * 60;
+  for (const c of candles) {
+    const bucket = Math.floor(c.time / step) * step;
+    const last = out[out.length - 1];
+    if (last && last.time === bucket) {
+      last.high = Math.max(last.high, c.high);
+      last.low = Math.min(last.low, c.low);
+      last.close = c.close;
+      last.volume += c.volume;
+    } else {
+      out.push({ ...c, time: bucket });
+    }
+  }
+  return out;
+}
+
+async function getCandles(address, tfMinutes = 1) {
+  if (!state.mock) await ensureHistory(address).catch(() => {});
+  return aggregate(state.candles.get(address) || [], tfMinutes);
+}
+
+async function ensureHistory(address) {
+  if (state.mode !== 'live') return;
+  const t = state.tokens.get(address);
+  if (!t || !t.pairAddress) return;
+  const last = state.historyLoadedAt.get(address) || 0;
+  if (Date.now() - last < 10 * 60_000) return;
+  state.historyLoadedAt.set(address, Date.now());
+  const json = await gecko(`/networks/solana/pools/${t.pairAddress}/ohlcv/minute?aggregate=1&limit=1000&currency=usd&token=base`);
+  const list = json?.data?.attributes?.ohlcv_list || [];
+  const hist = list
+    .map(([ts, o, h, l, c, v]) => ({ time: Math.floor(ts / 60) * 60, open: +o, high: +h, low: +l, close: +c, volume: +v || 0 }))
+    .filter((c) => c.open > 0 && c.close > 0)
+    .sort((a, b) => a.time - b.time);
+  if (!hist.length) return;
+  const live = state.candles.get(address) || [];
+  const newestHist = hist[hist.length - 1].time;
+  const merged = hist.concat(live.filter((c) => c.time > newestHist));
+  state.candles.set(address, merged.slice(-CFG.maxCandles));
+}
+
+// ---------- trending list ----------
+async function refreshTrending() {
+  const json = await gecko('/networks/solana/trending_pools?include=base_token&page=1');
+  const included = new Map((json.included || []).map((x) => [x.id, x.attributes || {}]));
+  const picked = [];
+  for (const pool of json.data || []) {
+    const a = pool.attributes || {};
+    const baseId = pool.relationships?.base_token?.data?.id;
+    const meta = included.get(baseId) || {};
+    const address = meta.address || (baseId || '').replace(/^solana_/, '');
+    if (!address || EXCLUDE.has(address) || picked.some((p) => p.address === address)) continue;
+    picked.push({
+      address,
+      symbol: meta.symbol || (a.name || '').split('/')[0].trim(),
+      name: meta.name || a.name,
+      image: meta.image_url && meta.image_url !== 'missing.png' ? meta.image_url : undefined,
+      pairAddress: a.address,
+      priceUsd: num(a.base_token_price_usd),
+      change5m: num(a.price_change_percentage?.m5),
+      change1h: num(a.price_change_percentage?.h1),
+      change24h: num(a.price_change_percentage?.h24),
+      volume24h: num(a.volume_usd?.h24),
+      liquidity: num(a.reserve_in_usd),
+      marketCap: num(a.market_cap_usd) || num(a.fdv_usd),
+      createdAt: a.pool_created_at ? Date.parse(a.pool_created_at) : undefined,
+    });
+    if (picked.length >= CFG.trendingCount) break;
+  }
+  if (!picked.length) throw new Error('trending list came back empty');
+  for (const t of picked) upsertToken({ ...t, updatedAt: Date.now() });
+  state.trending = picked.map((t) => t.address);
+  events.emit('trending', state.trending);
+}
+
+// ---------- live prices ----------
+async function fetchDexTokens(addresses) {
+  const out = new Map();
+  for (let i = 0; i < addresses.length; i += 30) {
+    const batch = addresses.slice(i, i + 30);
+    const pairs = await getJSON(`${DEX}/tokens/v1/solana/${batch.join(',')}`);
+    for (const p of Array.isArray(pairs) ? pairs : []) {
+      const addr = p?.baseToken?.address;
+      if (!addr || !batch.includes(addr)) continue;
+      const liq = p.liquidity?.usd || 0;
+      const prev = out.get(addr);
+      if (!prev || liq > (prev.liquidity?.usd || 0)) out.set(addr, p);
+    }
+  }
+  return out;
+}
+
+async function pollPrices() {
+  const tracked = new Set([...state.trending, ...heldTokenAddresses(), ...state.watchers.keys(), SOL_MINT]);
+  const pairs = await fetchDexTokens([...tracked]);
+  const now = Date.now();
+  const changed = [];
+  for (const [addr, p] of pairs) {
+    const price = num(p.priceUsd);
+    if (!price) continue;
+    if (addr === SOL_MINT) {
+      state.solPrice = price;
+      state.solUpdatedAt = now;
+      continue;
+    }
+    const prev = state.tokens.get(addr);
+    const t = upsertToken({
+      address: addr,
+      symbol: p.baseToken.symbol,
+      name: p.baseToken.name,
+      image: p.info?.imageUrl,
+      pairAddress: prev?.pairAddress || p.pairAddress,
+      priceUsd: price,
+      change5m: num(p.priceChange?.m5),
+      change1h: num(p.priceChange?.h1),
+      change24h: num(p.priceChange?.h24),
+      volume24h: num(p.volume?.h24),
+      liquidity: num(p.liquidity?.usd),
+      marketCap: num(p.marketCap) || num(p.fdv),
+      buys5m: p.txns?.m5?.buys,
+      sells5m: p.txns?.m5?.sells,
+      createdAt: p.pairCreatedAt,
+      updatedAt: now,
+    });
+    pushPriceToCandles(addr, price, now);
+    if (!prev || prev.priceUsd !== price) changed.push(publicToken(t));
+  }
+  persistHeld();
+  events.emit('prices', { sol: state.solPrice, tokens: changed, ts: now });
+}
+
+let lastPersist = 0;
+function persistHeld() {
+  if (Date.now() - lastPersist < 30_000) return;
+  lastPersist = Date.now();
+  for (const a of heldTokenAddresses()) persistToken(state.tokens.get(a));
+}
+
+// Look up a token that isn't on the trending list (e.g. pasted address)
+async function lookupToken(address) {
+  if (state.tokens.get(address)?.priceUsd && Date.now() - state.tokens.get(address).updatedAt < 60_000) return state.tokens.get(address);
+  if (state.mode !== 'live') return state.tokens.get(address) || null;
+  const pairs = await fetchDexTokens([address]);
+  const p = pairs.get(address);
+  if (!p) return state.tokens.get(address) || null;
+  const t = upsertToken({
+    address, symbol: p.baseToken.symbol, name: p.baseToken.name, image: p.info?.imageUrl,
+    pairAddress: p.pairAddress, priceUsd: num(p.priceUsd), change24h: num(p.priceChange?.h24),
+    change1h: num(p.priceChange?.h1), change5m: num(p.priceChange?.m5), volume24h: num(p.volume?.h24),
+    liquidity: num(p.liquidity?.usd), marketCap: num(p.marketCap) || num(p.fdv), updatedAt: Date.now(),
+  });
+  pushPriceToCandles(address, t.priceUsd);
+  return t;
+}
+
+// ---------- on-chain trade tape for tokens people are watching ----------
+async function pollTape() {
+  const watched = [...state.watchers.entries()].filter(([, n]) => n > 0).map(([a]) => a);
+  for (const address of watched.slice(0, 3)) {
+    const t = state.tokens.get(address);
+    if (!t?.pairAddress) continue;
+    try {
+      const json = await gecko(`/networks/solana/pools/${t.pairAddress}/trades`);
+      const seen = state.seenTx.get(address) || new Set();
+      const fresh = [];
+      for (const row of (json.data || []).slice().reverse()) {
+        const a = row.attributes || {};
+        const id = a.tx_hash || row.id;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        fresh.push({
+          id, side: a.kind === 'sell' ? 'sell' : 'buy', usd: num(a.volume_in_usd) || 0,
+          price: num(a.kind === 'sell' ? a.price_from_in_usd : a.price_to_in_usd),
+          wallet: a.tx_from_address ? `${a.tx_from_address.slice(0, 4)}…${a.tx_from_address.slice(-4)}` : '',
+          ts: a.block_timestamp ? Date.parse(a.block_timestamp) : Date.now(),
+        });
+      }
+      if (seen.size > 500) state.seenTx.set(address, new Set([...seen].slice(-300))); else state.seenTx.set(address, seen);
+      if (fresh.length) {
+        const tape = (state.tape.get(address) || []);
+        tape.unshift(...fresh.reverse());
+        state.tape.set(address, tape.slice(0, 60));
+        events.emit('tape', { address, trades: fresh });
+      }
+    } catch { /* tape is a nice-to-have */ }
+  }
+}
+
+function watch(address, delta) {
+  if (!address) return;
+  const n = (state.watchers.get(address) || 0) + delta;
+  if (n <= 0) state.watchers.delete(address); else state.watchers.set(address, n);
+}
+
+// ---------- demo market (offline / testing) ----------
+const DEMO = [
+  ['BONKZILLA', 'Bonkzilla'], ['GIGACHAD', 'Giga Chad Coin'], ['FROGGO', 'Froggo'], ['MOONCAT', 'Moon Cat'],
+  ['WAGMI', 'We All Gonna Make It'], ['PEPEX', 'Pepe Extreme'], ['DOGWIF2', 'Dog Wif Two Hats'], ['RUGPROOF', 'Rug Proof'],
+  ['SENDIT', 'Send It'], ['NGMI', 'Not Gonna Make It'], ['LAMBO', 'Lambo Soon'], ['HODL', 'Hodl Forever'],
+];
+function startDemo() {
+  state.mode = 'demo';
+  state.solPrice = state.solPrice || 180;
+  state.solUpdatedAt = Date.now();
+  const now = Date.now();
+  state.trending = [];
+  DEMO.forEach(([symbol, name], i) => {
+    const address = `DEMO${String(i).padStart(2, '0')}${symbol}`.padEnd(32, 'x');
+    let price = Math.pow(10, -(2 + (i % 6))) * (1 + Math.random() * 8);
+    const candles = [];
+    for (let m = 600; m > 0; m--) {
+      const o = price;
+      price *= Math.exp((Math.random() - 0.495) * 0.03);
+      const c = price;
+      candles.push({ time: Math.floor((now - m * 60_000) / 60_000) * 60, open: o, close: c,
+        high: Math.max(o, c) * (1 + Math.random() * 0.01), low: Math.min(o, c) * (1 - Math.random() * 0.01), volume: Math.random() * 5000 });
+    }
+    state.candles.set(address, candles);
+    upsertToken({ address, symbol, name, priceUsd: price, pairAddress: null, change24h: (Math.random() - 0.4) * 200,
+      change1h: (Math.random() - 0.5) * 40, change5m: (Math.random() - 0.5) * 10, volume24h: 1e5 + Math.random() * 5e6,
+      liquidity: 5e4 + Math.random() * 1e6, marketCap: 1e5 + Math.random() * 5e7, updatedAt: now, demo: true });
+    state.trending.push(address);
+  });
+  events.emit('trending', state.trending);
+}
+function tickDemo() {
+  const now = Date.now();
+  const changed = [];
+  state.solPrice *= Math.exp((Math.random() - 0.5) * 0.002);
+  state.solUpdatedAt = now;
+  for (const address of new Set([...state.trending, ...heldTokenAddresses()])) {
+    const t = state.tokens.get(address);
+    if (!t?.demo) { if (t) { t.updatedAt = now; } continue; }
+    const shock = Math.random() < 0.02 ? (Math.random() - 0.4) * 0.25 : 0;
+    const price = t.priceUsd * Math.exp((Math.random() - 0.497) * 0.012 + shock);
+    upsertToken({ address, priceUsd: price, updatedAt: now });
+    pushPriceToCandles(address, price, now, Math.random() * 300);
+    changed.push(publicToken(state.tokens.get(address)));
+    if (state.watchers.get(address) && Math.random() < 0.6) {
+      const side = Math.random() < 0.5 ? 'buy' : 'sell';
+      const trade = { id: `${now}-${Math.random()}`, side, usd: Math.random() ** 3 * 4000, price, wallet: 'demo…' + Math.floor(Math.random() * 9999), ts: now };
+      const tape = state.tape.get(address) || [];
+      tape.unshift(trade);
+      state.tape.set(address, tape.slice(0, 60));
+      events.emit('tape', { address, trades: [trade] });
+    }
+  }
+  events.emit('prices', { sol: state.solPrice, tokens: changed, ts: now });
+}
+
+// ---------- public shape ----------
+function publicToken(t) {
+  if (!t) return null;
+  return {
+    address: t.address, symbol: t.symbol, name: t.name, image: t.image || null, pairAddress: t.pairAddress || null,
+    priceUsd: t.priceUsd, change5m: t.change5m ?? null, change1h: t.change1h ?? null, change24h: t.change24h ?? null,
+    volume24h: t.volume24h ?? null, liquidity: t.liquidity ?? null, marketCap: t.marketCap ?? null,
+    buys5m: t.buys5m ?? null, sells5m: t.sells5m ?? null, createdAt: t.createdAt ?? null, updatedAt: t.updatedAt,
+  };
+}
+function snapshot() {
+  return {
+    mode: state.mode, sol: state.solPrice,
+    tokens: state.trending.map((a) => publicToken(state.tokens.get(a))).filter(Boolean),
+  };
+}
+function priceOf(address) {
+  const t = state.tokens.get(address);
+  return t ? { price: t.priceUsd, updatedAt: t.updatedAt || 0 } : null;
+}
+
+// ---------- start ----------
+async function start(log = console.log) {
+  hydrateFromDb();
+  if (CFG.mock) {
+    startDemo();
+    setInterval(tickDemo, 1500);
+    log('Market: DEMO mode (MOCK_MARKET=1) — prices are simulated.');
+    return;
+  }
+  try {
+    await refreshTrending();
+    await pollPrices();
+    if (!state.solPrice) throw new Error('no SOL price');
+    state.mode = 'live';
+    log(`Market: LIVE — tracking ${state.trending.length} trending Solana tokens. SOL = $${state.solPrice.toFixed(2)}`);
+  } catch (e) {
+    log(`Market: could not reach live data (${e.message}). Running DEMO market instead; will keep retrying.`);
+    startDemo();
+    const demoTimer = setInterval(tickDemo, 1500);
+    const retry = setInterval(async () => {
+      try {
+        await refreshTrending();
+        await pollPrices();
+        if (!state.solPrice) return;
+        clearInterval(demoTimer); clearInterval(retry);
+        state.mode = 'live';
+        log('Market: live data is back — switched to LIVE.');
+        events.emit('mode', 'live');
+        runLiveLoops(log);
+      } catch { /* keep demo running */ }
+    }, 60_000);
+    return;
+  }
+  runLiveLoops(log);
+}
+
+function runLiveLoops(log) {
+  let pricesBusy = false;
+  setInterval(async () => {
+    if (pricesBusy) return;
+    pricesBusy = true;
+    try { await pollPrices(); state.liveFailures = 0; }
+    catch (e) { if (++state.liveFailures % 20 === 1) log('Price poll failed:', e.message); }
+    finally { pricesBusy = false; }
+  }, CFG.pricePollMs);
+  setInterval(() => refreshTrending().catch((e) => log('Trending refresh failed:', e.message)), CFG.trendingRefreshMs);
+  let tapeBusy = false;
+  setInterval(async () => {
+    if (tapeBusy) return;
+    tapeBusy = true;
+    try { await pollTape(); } finally { tapeBusy = false; }
+  }, 8000);
+}
+
+module.exports = {
+  start, events, snapshot, publicToken, priceOf, lookupToken, getCandles, watch,
+  get solPrice() { return state.solPrice; },
+  get solUpdatedAt() { return state.solUpdatedAt; },
+  get mode() { return state.mode; },
+  tapeFor: (a) => state.tape.get(a) || [],
+  tokenInfo: (a) => publicToken(state.tokens.get(a)),
+  SOL_MINT,
+};

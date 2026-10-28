@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MemeSim — Memecoin Paper Trading</title>
+  <meta name="description" content="Trade real trending Solana memecoins with 100% fake money. Climb the leaderboard, earn badges.">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="MemeSim">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-row">
+      <a class="logo" href="#trending" aria-label="MemeSim home"><span class="logo-mark">M$</span><span class="logo-word">MEMESIM</span><span class="cursor">_</span></a>
+      <nav class="tabs" role="tablist" aria-label="Main">
+        <button class="tab" role="tab" data-view="trending" aria-selected="true">Trending Coins</button>
+        <button class="tab" role="tab" data-view="leaderboard" aria-selected="false">Leaderboard</button>
+        <button class="tab" role="tab" data-view="profile" aria-selected="false">Profile</button>
+      </nav>
+      <div class="acct" id="acct"></div>
+    </div>
+    <div class="ticker" aria-label="Live player trades">
+      <span class="live-dot" id="modeBadge">LIVE</span>
+      <div class="ticker-track"><div class="ticker-inner" id="ticker"></div></div>
+    </div>
+  </header>
+
+  <main id="app">
+    <!-- TRENDING -->
+    <section class="view" id="view-trending" data-active="true">
+      <div class="trade-layout" id="tradeLayout">
+        <aside class="coin-list panel" id="coinListPanel">
+          <div class="panel-head">
+            <span class="ph-title">// TRENDING · SOLANA</span>
+            <span class="ph-sub" id="coinCount"></span>
+          </div>
+          <div class="sort-chips" role="group" aria-label="Sort coins">
+            <button class="chip" data-sort="hot" aria-pressed="true">🔥 Hot</button>
+            <button class="chip" data-sort="gainers" aria-pressed="false">24h ▲</button>
+            <button class="chip" data-sort="m5" aria-pressed="false">5m ▲</button>
+            <button class="chip" data-sort="volume" aria-pressed="false">Vol</button>
+          </div>
+          <form class="ca-search" id="caSearch">
+            <input id="caInput" placeholder="Paste a Solana token address…" autocomplete="off" spellcheck="false" aria-label="Token address">
+            <button class="btn-ghost" type="submit">Go</button>
+          </form>
+          <div class="coin-rows" id="coinRows" role="list"></div>
+        </aside>
+
+        <section class="terminal panel" id="terminal" aria-label="Trading terminal">
+          <div class="term-empty" id="termEmpty">
+            <div class="term-empty-inner">
+              <div class="big-glyph">▚</div>
+              <p>Select a trending coin to open the terminal.</p>
+            </div>
+          </div>
+          <div class="term-body" id="termBody" hidden>
+            <div class="term-head">
+              <button class="back-btn" id="backBtn" aria-label="Back to coin list">←</button>
+              <div class="tok-id">
+                <img class="tok-img" id="tokImg" alt="">
+                <div>
+                  <div class="tok-sym" id="tokSym"></div>
+                  <div class="tok-name" id="tokName"></div>
+                </div>
+              </div>
+              <div class="tok-price-wrap">
+                <div class="tok-price" id="tokPrice">—</div>
+                <div class="tok-chg" id="tokChg"></div>
+              </div>
+            </div>
+            <div class="stat-strip" id="statStrip"></div>
+            <button class="my-pos-strip" id="myPosStrip" hidden></button>
+            <div class="chart-bar">
+              <div class="tf-group" role="group" aria-label="Timeframe">
+                <button class="tf" data-tf="1" aria-pressed="true">1m</button>
+                <button class="tf" data-tf="5" aria-pressed="false">5m</button>
+                <button class="tf" data-tf="15" aria-pressed="false">15m</button>
+                <button class="tf" data-tf="60" aria-pressed="false">1h</button>
+              </div>
+              <span class="chart-hint">drag · zoom · <b>tap chart to trade</b></span>
+              <button class="btn-ghost small" id="resetView">⟲ Latest</button>
+            </div>
+            <div class="chart-wrap" id="chartWrap"></div>
+
+            <div class="term-lower">
+              <div class="trade-box" id="tradeBox">
+                <div class="tb-sides" role="tablist" aria-label="Order side">
+                  <button class="side buy" data-side="buy" aria-selected="true">BUY</button>
+                  <button class="side sell" data-side="sell" aria-selected="false">SELL</button>
+                </div>
+                <div class="tb-row">
+                  <label class="tb-label" for="amountInput" id="amountLabel">Amount to spend</label>
+                  <div class="cur-toggle" role="group" aria-label="Currency">
+                    <button data-cur="USD" aria-pressed="true">USD</button>
+                    <button data-cur="SOL" aria-pressed="false">SOL</button>
+                  </div>
+                </div>
+                <div class="amount-field">
+                  <span class="amount-prefix" id="amountPrefix">$</span>
+                  <input id="amountInput" inputmode="decimal" autocomplete="off" placeholder="0.00" aria-describedby="tradeEst">
+                  <button class="max-btn" id="maxBtn" type="button">MAX</button>
+                </div>
+                <div class="quick" id="quickBtns"></div>
+                <div class="tb-est" id="tradeEst" aria-live="polite"></div>
+                <button class="exec buy" id="execBtn">BUY</button>
+                <div class="tb-bal" id="tbBal"></div>
+              </div>
+              <div class="tape panel-inner">
+                <div class="mini-head"><span>// LIVE ON-CHAIN TRADES</span><span class="pulse-dot"></span></div>
+                <div class="tape-rows" id="tapeRows"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="positions-tab" id="posTab" aria-label="Active positions">
+          <button class="pos-handle" id="posHandle" aria-expanded="false">
+            <span>POSITIONS</span><b id="posCount">0</b>
+          </button>
+          <div class="pos-inner panel">
+            <div class="panel-head">
+              <span class="ph-title">// ACTIVE POSITIONS</span>
+              <button class="btn-ghost small pos-close" id="posClose" aria-label="Close positions">✕</button>
+            </div>
+            <div class="pos-total" id="posTotal"></div>
+            <div class="pos-list" id="posList"></div>
+          </div>
+        </aside>
+      </div>
+      <div class="mobile-trade-bar" id="mobileTradeBar">
+        <button class="exec buy" data-open-side="buy">BUY</button>
+        <button class="exec sell" data-open-side="sell">SELL</button>
+      </div>
+    </section>
+
+    <!-- LEADERBOARD -->
+    <section class="view" id="view-leaderboard" data-active="false">
+      <div class="lb-wrap panel">
+        <div class="lb-head">
+          <div>
+            <h1 class="h-title">GLOBAL LEADERBOARD</h1>
+            <p class="h-sub">Ranked by simulated trading profit. Faucet top-ups don't count — only trading does.</p>
+          </div>
+          <div class="range-chips" role="group" aria-label="Timeframe">
+            <button class="chip" data-range="24h" aria-pressed="true">24H</button>
+            <button class="chip" data-range="30d" aria-pressed="false">30D</button>
+            <button class="chip" data-range="60d" aria-pressed="false">60D</button>
+            <button class="chip" data-range="all" aria-pressed="false">ALL TIME</button>
+          </div>
+        </div>
+        <div class="lb-table" role="table" aria-label="Top 100 players">
+          <div class="lb-row lb-th" role="row">
+            <span role="columnheader">#</span><span role="columnheader">Player</span>
+            <span role="columnheader" class="r">PnL</span><span role="columnheader" class="r hide-sm">Return</span><span role="columnheader" class="r hide-sm">Portfolio</span>
+          </div>
+          <div id="lbRows"></div>
+        </div>
+        <div class="lb-me" id="lbMe"></div>
+      </div>
+    </section>
+
+    <!-- PROFILE -->
+    <section class="view" id="view-profile" data-active="false">
+      <div class="profile" id="profile"></div>
+    </section>
+  </main>
+
+  <!-- Trade sheet backdrop (mobile) -->
+  <div class="sheet-backdrop" id="sheetBackdrop" hidden></div>
+
+  <!-- Auth -->
+  <div class="modal" id="authModal" hidden role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <form class="auth-card panel" id="authForm">
+      <button type="button" class="modal-x" id="authClose" aria-label="Close">✕</button>
+      <div class="auth-logo"><span class="logo-mark">M$</span></div>
+      <h2 id="authTitle">CREATE ACCOUNT</h2>
+      <p class="auth-sub" id="authSub">Get <b class="up">$1,000 mock USD</b> to trade real trending memecoins. No real money, ever.</p>
+      <label class="field" id="userField"><span>Username</span><input name="username" autocomplete="username" maxlength="16" placeholder="degen_420"></label>
+      <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" required placeholder="you@email.com"></label>
+      <label class="field"><span>Password</span><input name="password" type="password" autocomplete="new-password" minlength="8" required placeholder="8+ characters"></label>
+      <div class="auth-err" id="authErr" role="alert"></div>
+      <button class="exec buy" type="submit" id="authSubmit">START TRADING</button>
+      <button class="link-btn" type="button" id="authSwitch">Already have an account? Log in</button>
+    </form>
+  </div>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
