@@ -6,7 +6,9 @@ const market = require('./market');
 const CFG = {
   startingUsd: Number(process.env.STARTING_USD || 1000),
   faucetSol: Number(process.env.FAUCET_SOL || 5),
-  faucetCooldownMin: Number(process.env.FAUCET_COOLDOWN_MIN || 10),
+  faucetCooldownMin: Number(process.env.FAUCET_COOLDOWN_MIN || 0),
+  maxDepositUsd: Number(process.env.MAX_DEPOSIT_USD || 1_000_000), // biggest single top-up
+  whaleTarget: 50_000,
   snapshotMinutes: Number(process.env.SNAPSHOT_MINUTES || 15),
   maxPriceAgeMs: 90_000,
   sessionDays: 30,
@@ -24,7 +26,7 @@ const BADGES = {
   },
   whale: {
     name: 'Whale Status', icon: '🐋', color: '#b388ff',
-    how: 'Total portfolio value passed $50,000 mock USD.',
+    how: 'Grew your account past $50,000 mock USD. Money you add yourself does not count; only your starting $1,000 plus trading profit.',
   },
   paper_hands: {
     name: 'Paper Hands', icon: '🧻', color: '#ffd23f',
@@ -151,14 +153,18 @@ function account(userId) {
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!u) throw new GameError('Account not found.', 404);
   const v = accountValue(u);
-  if (v.value >= 50_000) award(u.id, 'whale', `Portfolio hit $${Math.round(v.value).toLocaleString('en-US')}`);
+  if (CFG.startingUsd + v.profit >= CFG.whaleTarget) award(u.id, 'whale', `Traded $1,000 up to $${Math.round(CFG.startingUsd + v.profit).toLocaleString('en-US')}`);
   return {
     id: u.id, username: u.username, email: u.email, createdAt: u.created_at,
+    avatar: u.avatar || null, color: u.color || null, bio: u.bio || '',
     usd: u.usd, sol: u.sol, solPrice: market.solPrice, netDeposits: u.net_deposits,
     holdings: v.holdings, value: v.value, profit: v.profit,
     faucet: { amountSol: CFG.faucetSol, cooldownMin: CFG.faucetCooldownMin, nextAt: u.faucet_at + CFG.faucetCooldownMin * 60_000 },
     positions: positionsFor(u.id),
     badges: badgesFor(u.id),
+    watchlist: watchlistFor(u.id),
+    deposits: db.prepare('SELECT currency, amount, usd_value AS usdValue, ts FROM deposits WHERE user_id = ? ORDER BY ts DESC LIMIT 20').all(u.id),
+    maxDepositUsd: CFG.maxDepositUsd,
   };
 }
 
@@ -174,8 +180,88 @@ function faucet(userId) {
     const usdValue = CFG.faucetSol * sol;
     db.prepare('UPDATE users SET sol = sol + ?, net_deposits = net_deposits + ?, faucet_at = ? WHERE id = ?')
       .run(CFG.faucetSol, usdValue, now, userId);
+    db.prepare('INSERT INTO deposits (user_id, currency, amount, usd_value, ts) VALUES (?, ?, ?, ?, ?)').run(userId, 'SOL', CFG.faucetSol, usdValue, now);
     return { addedSol: CFG.faucetSol, solPrice: sol, usdValue };
   });
+}
+
+// ---------------- add funds (any amount) ----------------
+// Added money raises "net deposits", so it never shows up as profit on the leaderboard.
+function deposit(userId, body) {
+  const currency = body?.currency === 'SOL' ? 'SOL' : 'USD';
+  const amount = Number(body?.amount);
+  if (!(amount > 0) || !Number.isFinite(amount)) throw new GameError('Enter an amount to add.');
+  const sol = market.solPrice;
+  if (currency === 'SOL' && !sol) throw new GameError('SOL price is not available yet — try again in a few seconds.', 503);
+  const usdValue = currency === 'USD' ? amount : amount * sol;
+  if (usdValue < 0.01) throw new GameError('Minimum is $0.01.');
+  if (usdValue > CFG.maxDepositUsd) throw new GameError(`Max per top-up is $${CFG.maxDepositUsd.toLocaleString('en-US')} (add more in another top-up).`);
+  const now = Date.now();
+  tx(() => {
+    if (currency === 'USD') db.prepare('UPDATE users SET usd = usd + ?, net_deposits = net_deposits + ? WHERE id = ?').run(amount, usdValue, userId);
+    else db.prepare('UPDATE users SET sol = sol + ?, net_deposits = net_deposits + ? WHERE id = ?').run(amount, usdValue, userId);
+    db.prepare('INSERT INTO deposits (user_id, currency, amount, usd_value, ts) VALUES (?, ?, ?, ?, ?)').run(userId, currency, amount, usdValue, now);
+  });
+  return { currency, amount, usdValue, solPrice: sol || null };
+}
+
+// ---------------- profile ----------------
+const AVATARS = ['🐸', '🐶', '🐱', '🦊', '🐵', '🐼', '🦍', '🐳', '🦈', '🐙', '🦄', '🐲', '👽', '🤖', '💀', '🤡', '😎', '🥷', '🧙', '👑', '💎', '🚀', '🔥', '🌙'];
+const COLORS = ['#a6ff00', '#ff2e88', '#00e5ff', '#ffd23f', '#b388ff', '#ff8a3d', '#5ff2a0', '#ffffff'];
+function updateProfile(userId, body) {
+  const avatar = body?.avatar == null || body.avatar === '' ? null : String(body.avatar);
+  const color = body?.color == null || body.color === '' ? null : String(body.color).toLowerCase();
+  const bio = String(body?.bio ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 140);
+  if (avatar && !AVATARS.includes(avatar)) throw new GameError('Pick one of the avatars shown.');
+  if (color && !COLORS.includes(color)) throw new GameError('Pick one of the colors shown.');
+  db.prepare('UPDATE users SET avatar = ?, color = ?, bio = ? WHERE id = ?').run(avatar, color, bio, userId);
+  return { avatar, color, bio };
+}
+
+// What anyone can see about a player (no email).
+function publicProfile(username, meId) {
+  const u = db.prepare('SELECT * FROM users WHERE username = ?').get(String(username || ''));
+  if (!u) throw new GameError('Player not found.', 404);
+  const v = accountValue(u);
+  const sells = db.prepare(`SELECT COUNT(*) AS n, SUM(pnl_usd > 0) AS wins, MAX(pnl_pct) AS best FROM trades WHERE user_id = ? AND side = 'sell'`).get(u.id);
+  return {
+    username: u.username, avatar: u.avatar || null, color: u.color || null, bio: u.bio || '',
+    createdAt: u.created_at, isMe: u.id === meId,
+    value: v.value, profit: v.profit,
+    trades: db.prepare('SELECT COUNT(*) AS n FROM trades WHERE user_id = ?').get(u.id).n,
+    sells: sells.n || 0, winRate: sells.n ? (sells.wins || 0) / sells.n * 100 : null, bestTradePct: sells.best ?? null,
+    badges: badgesFor(u.id),
+    positions: positionsFor(u.id).map((p) => ({ address: p.address, symbol: p.symbol, image: p.image, value: p.value, pnlPct: p.pnlPct })),
+    recentTrades: db.prepare('SELECT side, symbol, token, usd_value AS usdValue, pnl_pct AS pnlPct, ts FROM trades WHERE user_id = ? ORDER BY ts DESC LIMIT 10').all(u.id),
+  };
+}
+
+// ---------------- watchlist ----------------
+const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+function watchlistFor(userId) {
+  return db.prepare('SELECT w.token, w.added_at, t.symbol, t.name, t.image FROM watchlist w LEFT JOIN tokens t ON t.address = w.token WHERE w.user_id = ? ORDER BY w.added_at DESC').all(userId)
+    .map((w) => {
+      const live = market.tokenInfo(w.token) || {};
+      return {
+        address: w.token, addedAt: w.added_at, symbol: live.symbol || w.symbol || '?', name: live.name || w.name || '',
+        image: live.image || w.image || null, priceUsd: live.priceUsd ?? priceFor(w.token) ?? null,
+        change24h: live.change24h ?? null, change5m: live.change5m ?? null, marketCap: live.marketCap ?? null,
+        volume24h: live.volume24h ?? null, isPump: live.isPump ?? w.token.endsWith('pump'), pairAddress: live.pairAddress ?? null,
+      };
+    });
+}
+function setWatch(userId, body) {
+  const address = String(body?.address || '');
+  if (!BASE58.test(address)) throw new GameError('That is not a Solana token address.');
+  if (body?.on === false) {
+    db.prepare('DELETE FROM watchlist WHERE user_id = ? AND token = ?').run(userId, address);
+  } else {
+    const n = db.prepare('SELECT COUNT(*) AS n FROM watchlist WHERE user_id = ?').get(userId).n;
+    if (n >= 50) throw new GameError('Your watchlist is full (50 coins). Remove one first.');
+    db.prepare('INSERT OR IGNORE INTO watchlist (user_id, token, added_at) VALUES (?, ?, ?)').run(userId, address, Date.now());
+    market.rememberToken(address);
+  }
+  return watchlistFor(userId);
 }
 
 // ---------------- trading ----------------
@@ -290,7 +376,7 @@ function checkTimedBadges() {
   }
   for (const u of db.prepare('SELECT * FROM users').all()) {
     const v = accountValue(u);
-    if (v.value >= 50_000) award(u.id, 'whale', `Portfolio hit $${Math.round(v.value).toLocaleString('en-US')}`);
+    if (CFG.startingUsd + v.profit >= CFG.whaleTarget) award(u.id, 'whale', `Traded $1,000 up to $${Math.round(CFG.startingUsd + v.profit).toLocaleString('en-US')}`);
   }
 }
 
@@ -337,7 +423,7 @@ function leaderboard(range, meId) {
     const gain = v.profit - baseline;
     const base = u.net_deposits + baseline;
     return {
-      userId: u.id, username: u.username, value: v.value, profit: gain,
+      userId: u.id, username: u.username, avatar: u.avatar || null, color: u.color || null, value: v.value, profit: gain,
       profitPct: base > 0 ? (gain / base) * 100 : 0,
       badges: badges.get(u.id) || [],
     };
@@ -349,6 +435,6 @@ function leaderboard(range, meId) {
 }
 
 module.exports = {
-  CFG, BADGES, GameError, register, login, userFromSession, destroySession, account, faucet, trade,
+  CFG, BADGES, AVATARS, COLORS, GameError, register, deposit, updateProfile, publicProfile, setWatch, login, userFromSession, destroySession, account, faucet, trade,
   myTrades, recentFeed, leaderboard, snapshotsFor, takeSnapshots, checkTimedBadges, takeNewBadges, badgesFor,
 };
