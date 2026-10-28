@@ -49,6 +49,7 @@
             <button class="chip" data-sort="gainers" aria-pressed="false">24h ▲</button>
             <button class="chip" data-sort="m5" aria-pressed="false">5m ▲</button>
             <button class="chip" data-sort="volume" aria-pressed="false">Vol</button>
+            <button class="chip" data-sort="watch" aria-pressed="false">★ Watching</button>
           </div>
           <form class="ca-search" id="caSearch">
             <input id="caInput" placeholder="Paste a Solana token address…" autocomplete="off" spellcheck="false" aria-label="Token address">
@@ -74,6 +75,7 @@
                   <div class="tok-name" id="tokName"></div>
                 </div>
               </div>
+              <button class="watch-btn" id="watchBtn" type="button" aria-pressed="false">☆ Watch</button>
               <div class="tok-price-wrap">
                 <div class="tok-price" id="tokPrice">—</div>
                 <div class="tok-chg" id="tokChg"></div>
@@ -193,6 +195,50 @@
       <button class="exec buy" type="submit" id="authSubmit">START TRADING</button>
       <button class="link-btn" type="button" id="authSwitch">Already have an account? Log in</button>
     </form>
+  </div>
+
+  <!-- Add funds -->
+  <div class="modal" id="fundsModal" data-modal hidden role="dialog" aria-modal="true" aria-labelledby="fundsTitle">
+    <form class="sheet-card panel" id="fundsForm">
+      <button type="button" class="modal-x" data-close aria-label="Close">✕</button>
+      <h2 id="fundsTitle">ADD FUNDS</h2>
+      <p class="auth-sub">Put any amount of <b class="up">mock money</b> in your wallet. It's fake. Added money never counts as profit on the leaderboard.</p>
+      <div class="tb-row">
+        <span class="tb-label">Currency</span>
+        <div class="cur-toggle" role="group" aria-label="Currency to add">
+          <button type="button" data-fcur="USD" aria-pressed="true">USD</button>
+          <button type="button" data-fcur="SOL" aria-pressed="false">SOL</button>
+        </div>
+      </div>
+      <div class="amount-field">
+        <span class="amount-prefix" id="fundsPrefix">$</span>
+        <input id="fundsAmount" inputmode="decimal" autocomplete="off" placeholder="10,000" aria-label="Amount to add">
+      </div>
+      <div class="quick" id="fundsQuick"></div>
+      <div class="tb-est" id="fundsEst" aria-live="polite"></div>
+      <div class="auth-err" id="fundsErr" role="alert"></div>
+      <button class="exec buy" type="submit" id="fundsSubmit">ADD TO WALLET</button>
+      <button class="link-btn" type="button" id="fundsDrop">or grab a free 5 SOL drop</button>
+    </form>
+  </div>
+
+  <!-- Edit profile -->
+  <div class="modal" id="profileModal" data-modal hidden role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+    <form class="sheet-card panel" id="profileForm">
+      <button type="button" class="modal-x" data-close aria-label="Close">✕</button>
+      <h2 id="profileTitle">EDIT PROFILE</h2>
+      <div class="pe-preview" id="pePreview"></div>
+      <div class="field"><span>Avatar</span><div class="emoji-grid" id="peAvatars" role="radiogroup" aria-label="Avatar"></div></div>
+      <div class="field"><span>Color</span><div class="swatches" id="peColors" role="radiogroup" aria-label="Color"></div></div>
+      <label class="field"><span>Bio <em class="muted" id="peCount">0/140</em></span><textarea id="peBio" maxlength="140" rows="3" placeholder="Diamond hands since 2024. Not financial advice."></textarea></label>
+      <div class="auth-err" id="peErr" role="alert"></div>
+      <button class="exec buy" type="submit" id="peSave">SAVE PROFILE</button>
+    </form>
+  </div>
+
+  <!-- Someone else's profile -->
+  <div class="modal" id="playerModal" data-modal hidden role="dialog" aria-modal="true" aria-label="Player profile">
+    <div class="sheet-card panel wide" id="playerCard"></div>
   </div>
 
   <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
