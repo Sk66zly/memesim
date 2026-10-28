@@ -58,7 +58,9 @@ async function getJSON(url) {
 // GeckoTerminal allows ~30 requests/min on the free tier, so every call goes through this queue.
 const geckoQueue = [];
 let geckoBusy = false;
+let geckoPausedUntil = 0; // after a "429 too many requests", give GeckoTerminal a rest
 function gecko(path) {
+  if (Date.now() < geckoPausedUntil) return Promise.reject(new Error('429 from api.geckoterminal.com (cooling down)'));
   return new Promise((resolve, reject) => {
     geckoQueue.push({ path, resolve, reject });
     pumpGecko();
@@ -69,7 +71,12 @@ async function pumpGecko() {
   geckoBusy = true;
   while (geckoQueue.length) {
     const job = geckoQueue.shift();
-    try { job.resolve(await getJSON(GECKO + job.path)); } catch (e) { job.reject(e); }
+    if (Date.now() < geckoPausedUntil) { job.reject(new Error('429 from api.geckoterminal.com (cooling down)')); continue; }
+    try { job.resolve(await getJSON(GECKO + job.path)); }
+    catch (e) {
+      if (String(e.message).startsWith('429')) geckoPausedUntil = Date.now() + 90_000;
+      job.reject(e);
+    }
     await sleep(2200);
   }
   geckoBusy = false;
@@ -175,37 +182,79 @@ async function ensureHistory(address) {
 }
 
 // ---------- trending list ----------
+// Pump.fun coins first. Every coin launched on Pump.fun has a mint address ending in "pump", and
+// DexScreener tracks both the Pump.fun launch curve (dexId "pumpfun") and PumpSwap after a coin graduates.
+// Candidate coins come from GeckoTerminal's trending list (when it isn't rate-limiting us) plus
+// DexScreener's boosted and newest-profile lists; then everything is ranked by live 24h volume.
+const PUMP_DEXES = new Set(['pumpfun', 'pumpswap', 'pump-fun']);
+const isPumpCoin = (address, dexId) => address.endsWith('pump') || PUMP_DEXES.has(String(dexId || '').toLowerCase());
+
 async function refreshTrending() {
+  const candidates = [];
+  const seen = new Set();
+  const add = (a) => { if (a && !EXCLUDE.has(a) && !seen.has(a)) { seen.add(a); candidates.push(a); } };
+
+  const [geckoList, ...dexLists] = await Promise.allSettled([
+    geckoTrendingAddresses(),
+    getJSON(`${DEX}/token-boosts/top/v1`),
+    getJSON(`${DEX}/token-boosts/latest/v1`),
+    getJSON(`${DEX}/token-profiles/latest/v1`),
+  ]);
+  if (geckoList.status === 'fulfilled') geckoList.value.forEach(add);
+  else if (state.lastGeckoNote !== geckoList.reason?.message) {
+    state.lastGeckoNote = geckoList.reason?.message;
+    console.log(`Trending: GeckoTerminal unavailable (${geckoList.reason?.message}); using DexScreener lists.`);
+  }
+  for (const l of dexLists) {
+    if (l.status !== 'fulfilled' || !Array.isArray(l.value)) continue;
+    for (const b of l.value) if (b?.chainId === 'solana') add(b.tokenAddress);
+  }
+  if (!candidates.length) throw new Error('no trending sources reachable');
+
+  // Pump.fun addresses first so they make the cut, then look up live stats for up to 90 coins.
+  candidates.sort((a, b) => b.endsWith('pump') - a.endsWith('pump'));
+  const pairs = await fetchDexTokens(candidates.slice(0, 90));
+  const alive = [...pairs.values()].filter((p) => {
+    if (!num(p.priceUsd)) return false;
+    const onCurve = String(p.dexId).toLowerCase() === 'pumpfun'; // launch-curve coins report little/no liquidity
+    return onCurve ? (p.volume?.h24 || 0) >= 5000 : (p.liquidity?.usd || 0) >= 5000;
+  });
+  const byVol = (a, b) => (b.volume?.h24 || 0) - (a.volume?.h24 || 0);
+  const pump = alive.filter((p) => isPumpCoin(p.baseToken.address, p.dexId)).sort(byVol);
+  const other = alive.filter((p) => !isPumpCoin(p.baseToken.address, p.dexId)).sort(byVol);
+  const ranked = pump.concat(other).slice(0, CFG.trendingCount);
+  if (!ranked.length) throw new Error('no actively traded Solana coins found');
+
+  const now = Date.now();
+  for (const p of ranked) {
+    const addr = p.baseToken.address;
+    upsertToken({
+      address: addr, symbol: p.baseToken.symbol, name: p.baseToken.name, image: p.info?.imageUrl,
+      pairAddress: state.tokens.get(addr)?.pairAddress || p.pairAddress, dexId: p.dexId,
+      isPump: isPumpCoin(addr, p.dexId), priceUsd: num(p.priceUsd),
+      change5m: num(p.priceChange?.m5), change1h: num(p.priceChange?.h1), change24h: num(p.priceChange?.h24),
+      volume24h: num(p.volume?.h24), liquidity: num(p.liquidity?.usd), marketCap: num(p.marketCap) || num(p.fdv),
+      buys5m: p.txns?.m5?.buys, sells5m: p.txns?.m5?.sells, createdAt: p.pairCreatedAt, updatedAt: now,
+    });
+  }
+  state.trending = ranked.map((p) => p.baseToken.address);
+  state.trendingSource = geckoList.status === 'fulfilled' ? 'geckoterminal+dexscreener' : 'dexscreener';
+  events.emit('trending', state.trending);
+}
+
+// Addresses from GeckoTerminal's Solana trending pools (also remembers each coin's pool for chart history).
+async function geckoTrendingAddresses() {
   const json = await gecko('/networks/solana/trending_pools?include=base_token&page=1');
   const included = new Map((json.included || []).map((x) => [x.id, x.attributes || {}]));
-  const picked = [];
+  const out = [];
   for (const pool of json.data || []) {
-    const a = pool.attributes || {};
     const baseId = pool.relationships?.base_token?.data?.id;
-    const meta = included.get(baseId) || {};
-    const address = meta.address || (baseId || '').replace(/^solana_/, '');
-    if (!address || EXCLUDE.has(address) || picked.some((p) => p.address === address)) continue;
-    picked.push({
-      address,
-      symbol: meta.symbol || (a.name || '').split('/')[0].trim(),
-      name: meta.name || a.name,
-      image: meta.image_url && meta.image_url !== 'missing.png' ? meta.image_url : undefined,
-      pairAddress: a.address,
-      priceUsd: num(a.base_token_price_usd),
-      change5m: num(a.price_change_percentage?.m5),
-      change1h: num(a.price_change_percentage?.h1),
-      change24h: num(a.price_change_percentage?.h24),
-      volume24h: num(a.volume_usd?.h24),
-      liquidity: num(a.reserve_in_usd),
-      marketCap: num(a.market_cap_usd) || num(a.fdv_usd),
-      createdAt: a.pool_created_at ? Date.parse(a.pool_created_at) : undefined,
-    });
-    if (picked.length >= CFG.trendingCount) break;
+    const address = included.get(baseId)?.address || (baseId || '').replace(/^solana_/, '');
+    if (!address) continue;
+    if (!state.tokens.get(address)?.pairAddress && pool.attributes?.address) upsertToken({ address, pairAddress: pool.attributes.address });
+    out.push(address);
   }
-  if (!picked.length) throw new Error('trending list came back empty');
-  for (const t of picked) upsertToken({ ...t, updatedAt: Date.now() });
-  state.trending = picked.map((t) => t.address);
-  events.emit('trending', state.trending);
+  return out;
 }
 
 // ---------- live prices ----------
@@ -252,6 +301,8 @@ async function pollPrices() {
       volume24h: num(p.volume?.h24),
       liquidity: num(p.liquidity?.usd),
       marketCap: num(p.marketCap) || num(p.fdv),
+      dexId: p.dexId,
+      isPump: isPumpCoin(addr, p.dexId),
       buys5m: p.txns?.m5?.buys,
       sells5m: p.txns?.m5?.sells,
       createdAt: p.pairCreatedAt,
@@ -390,6 +441,7 @@ function publicToken(t) {
     address: t.address, symbol: t.symbol, name: t.name, image: t.image || null, pairAddress: t.pairAddress || null,
     priceUsd: t.priceUsd, change5m: t.change5m ?? null, change1h: t.change1h ?? null, change24h: t.change24h ?? null,
     volume24h: t.volume24h ?? null, liquidity: t.liquidity ?? null, marketCap: t.marketCap ?? null,
+    dexId: t.dexId ?? null, isPump: Boolean(t.isPump ?? String(t.address).endsWith('pump')),
     buys5m: t.buys5m ?? null, sells5m: t.sells5m ?? null, createdAt: t.createdAt ?? null, updatedAt: t.updatedAt,
   };
 }
