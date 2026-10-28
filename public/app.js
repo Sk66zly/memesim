@@ -211,11 +211,11 @@ function renderAcct() {
   if (el.dataset.state !== 'user') {
     el.dataset.state = 'user';
     el.innerHTML = `
-      <button class="faucet-btn" id="hdrFaucet" title="Add free mock SOL"></button>
+      <button class="faucet-btn" id="hdrFunds" title="Add mock money to your wallet">＋ FUNDS</button>
       <a class="bal-chip" href="#profile" style="text-decoration:none;color:inherit">
         <span class="v" id="hdrVal"></span><span class="p" id="hdrPnl"></span>
       </a>`;
-    $('#hdrFaucet').addEventListener('click', claimFaucet);
+    $('#hdrFunds').addEventListener('click', () => openFunds());
   }
   const v = $('#hdrVal');
   const nv = fmtUsd(u.value);
@@ -231,15 +231,10 @@ function updateFaucetButtons() {
   const left = Math.max(0, S.user.faucet.nextAt - Date.now());
   const amt = S.user.faucet.amountSol;
   const usd = amt * (S.sol || S.user.solPrice || 0);
-  const hdr = $('#hdrFaucet');
-  if (hdr) {
-    hdr.disabled = left > 0;
-    hdr.innerHTML = left > 0 ? `💧 ${fmtCountdown(left)}` : `💧 +${amt} SOL<span class="lbl hide-xs"> FAUCET</span>`;
-  }
   const big = $('#pfFaucet');
   if (big) {
     big.disabled = left > 0;
-    big.textContent = left > 0 ? `RECHARGING · ${fmtCountdown(left)}` : `💧 CLAIM +${amt} MOCK SOL (≈ ${fmtUsd(usd)})`;
+    big.textContent = left > 0 ? `RECHARGING · ${fmtCountdown(left)}` : `💧 FREE DROP +${amt} SOL (≈ ${fmtUsd(usd)})`;
   }
 }
 const fmtCountdown = (ms) => { const s = Math.ceil(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
@@ -260,17 +255,28 @@ async function refreshMe() {
   const had = S.user;
   S.user = d.user;
   if (S.user && S.user.solPrice) S.sol = S.sol || S.user.solPrice;
+  mergeWatchlist();
   renderAcct();
   renderPositions();
   updateBalances();
   updateEstimate();
-  if (S.selected) { updateChartLines(); renderCoinList(); }
+  if (S.selected) updateChartLines();
+  renderCoinList();
+  updateWatchBtn();
   if (S.view === 'profile') renderProfile();
   if (!had !== !S.user) connectStream(); // reconnect so badge pushes reach us
 }
 
 // ================= coin list =================
+function watchedSet() { return new Set((S.user?.watchlist || []).map((w) => w.address)); }
+function mergeWatchlist() {
+  for (const w of S.user?.watchlist || []) {
+    const cur = S.tokens.get(w.address);
+    if (!cur?.priceUsd) S.tokens.set(w.address, { ...w, ...(cur || {}) , priceUsd: cur?.priceUsd ?? w.priceUsd });
+  }
+}
 function sortedTrending() {
+  if (S.sort === 'watch') return (S.user?.watchlist || []).map((w) => S.tokens.get(w.address) || w);
   const list = S.trending.map((a) => S.tokens.get(a)).filter(Boolean);
   const by = { gainers: 'change24h', m5: 'change5m', volume: 'volume24h' }[S.sort];
   if (by) list.sort((a, b) => (b[by] ?? -Infinity) - (a[by] ?? -Infinity));
@@ -281,12 +287,17 @@ function renderCoinList() {
   const list = sortedTrending();
   $('#coinCount').textContent = `${list.length} coins`;
   const held = new Set((S.user?.positions || []).map((p) => p.address));
+  const watched = watchedSet();
+  if (!list.length && S.sort === 'watch') {
+    rows.innerHTML = `<div class="tape-empty">${S.user ? 'Nothing on your watchlist yet. Open any coin and tap <b>☆ Watch</b> to track it here.' : '<button class="link-btn" data-auth="signup">Make an account</button> to keep a watchlist.'}</div>`;
+    return;
+  }
   rows.innerHTML = list.map((t, i) => `
     <button class="coin-row" role="listitem" data-addr="${esc(t.address)}" aria-current="${t.address === S.selected}">
       <span class="rank">${i + 1}</span>
       ${coinImg(t)}
       <span class="coin-main">
-        <span class="coin-sym">${esc(t.symbol)}${t.isPump ? '<span class="pump-tag" title="Launched on Pump.fun">PUMP</span>' : ''}${held.has(t.address) ? '<span class="held-dot">HELD</span>' : ''}</span>
+        <span class="coin-sym">${esc(t.symbol)}${t.isPump ? '<span class="pump-tag" title="Launched on Pump.fun">PUMP</span>' : ''}${held.has(t.address) ? '<span class="held-dot">HELD</span>' : ''}${watched.has(t.address) ? '<span class="star-on" title="On your watchlist">★</span>' : ''}</span>
         <span class="coin-sub">MC ${fmtUsd(t.marketCap, { compact: true })} · V ${fmtUsd(t.volume24h, { compact: true })}</span>
       </span>
       <span class="coin-right">
@@ -399,6 +410,7 @@ function renderTermHead() {
     ['Age', age],
   ].map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
   document.title = `${t.symbol} ${fmtPrice(t.priceUsd)} · MemeSim`;
+  updateWatchBtn();
 }
 
 function onSelectedTick(t, dir) {
@@ -429,6 +441,30 @@ $$('.tf').forEach((b) => b.addEventListener('click', () => {
   loadCandles();
 }));
 $('#resetView').addEventListener('click', () => chart?.resetView());
+
+function updateWatchBtn() {
+  const b = $('#watchBtn');
+  if (!b) return;
+  const on = watchedSet().has(S.selected);
+  b.setAttribute('aria-pressed', on);
+  b.textContent = on ? '★ Watching' : '☆ Watch';
+  b.hidden = !S.selected || String(S.selected).startsWith('DEMO');
+}
+async function toggleWatch(address = S.selected) {
+  if (!S.user) return openAuth('signup');
+  const on = !watchedSet().has(address);
+  try {
+    const r = await api('/api/watchlist', { address, on });
+    S.user.watchlist = r.watchlist;
+    mergeWatchlist();
+    updateWatchBtn();
+    renderCoinList();
+    if (S.view === 'profile') renderMyCoins();
+    const sym = S.tokens.get(address)?.symbol || 'Coin';
+    toast(on ? `★ <b>${esc(sym)}</b> added to your watchlist` : `${esc(sym)} removed from your watchlist`, 'info', 2200);
+  } catch (e) { toast(esc(e.message), 'err'); }
+}
+$('#watchBtn').addEventListener('click', () => toggleWatch());
 $('#backBtn').addEventListener('click', () => { location.hash = 'trending'; });
 
 // ---------- tape ----------
@@ -831,15 +867,15 @@ async function loadLeaderboard() {
   try {
     const d = await api(`/api/leaderboard?range=${S.lbRange}`);
     const rows = $('#lbRows');
-    const row = (r) => `<div class="lb-row ${r.rank <= 3 ? 'top' + r.rank : ''} ${r.isMe ? 'me' : ''}" role="row">
+    const row = (r, extra = '') => `<div class="lb-row ${r.rank <= 3 ? 'top' + r.rank : ''} ${r.isMe ? 'me' : ''}" role="row">
         <span class="lb-rank" role="cell">${r.rank === 1 ? '👑' : '#' + r.rank}</span>
-        <span class="lb-name" role="cell"><span class="nm">${esc(r.username)}</span>${r.isMe ? '<span class="you-tag">YOU</span>' : ''}${badgeIcons(r.badges)}</span>
+        <span class="lb-name" role="cell"><button class="lb-player" data-player="${esc(r.username)}" title="View profile">${avatarHtml(r)}<span class="nm">${esc(r.username)}${esc(extra)}</span></button>${r.isMe ? '<span class="you-tag">YOU</span>' : ''}${badgeIcons(r.badges)}</span>
         <span class="lb-pnl r ${cls(r.profit)}" role="cell">${fmtUsd(r.profit, { sign: true })}</span>
         <span class="r hide-sm ${cls(r.profitPct)}" role="cell">${fmtPct(r.profitPct, 1)}</span>
         <span class="r hide-sm muted" role="cell">${fmtUsd(r.value, { compact: true })}</span>
       </div>`;
     rows.innerHTML = d.top.length ? d.top.map(row).join('') : `<div class="lb-empty">No players yet — be the first.</div>`;
-    $('#lbMe').innerHTML = d.me ? row({ ...d.me, username: `${d.me.username}  · rank ${d.me.rank} of ${d.total}` }) : (S.user ? '' : `<div class="lb-row me"><span></span><span class="lb-name">Make an account to get ranked</span><span class="r"><button class="btn-ghost small" data-auth="signup">Join</button></span></div>`);
+    $('#lbMe').innerHTML = d.me ? row(d.me, `  · rank ${d.me.rank} of ${d.total}`) : (S.user ? '' : `<div class="lb-row me"><span></span><span class="lb-name">Make an account to get ranked</span><span class="r"><button class="btn-ghost small" data-auth="signup">Join</button></span></div>`);
   } catch (e) { toast(esc(e.message), 'err'); }
 }
 $$('.range-chips .chip').forEach((b) => b.addEventListener('click', () => {
@@ -909,12 +945,17 @@ async function renderProfile() {
     root.dataset.uid = u.id;
     root.innerHTML = `
       <div class="pf-hero panel pf-card">
-        <div class="avatar">${esc(u.username[0].toUpperCase())}</div>
-        <div>
+        <div id="pfAvatar"></div>
+        <div class="pf-who">
           <div class="pf-name"><span>${esc(u.username)}</span><span id="pfBadges"></span></div>
+          <div class="pf-bio" id="pfBio"></div>
           <div class="pf-meta">${esc(u.email)} · trading since ${new Date(u.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</div>
         </div>
-        <div class="pf-actions"><button class="btn-ghost" id="logoutBtn">Log out</button></div>
+        <div class="pf-actions">
+          <button class="btn-ghost" id="editProfileBtn">✎ Edit profile</button>
+          <button class="btn-ghost" data-player="${esc(u.username)}">👁 Public view</button>
+          <button class="btn-ghost" id="logoutBtn">Log out</button>
+        </div>
       </div>
       <div class="pf-stats panel" id="pfStats"></div>
       <div class="pf-cal panel pf-card">
@@ -927,8 +968,14 @@ async function renderProfile() {
       <div class="pf-faucet panel pf-card">
         <div class="sec-title"><h3>// VIRTUAL WALLET</h3></div>
         <div id="walletLines"></div>
+        <button class="exec buy" id="pfAddFunds" type="button">＋ ADD FUNDS</button>
         <button class="faucet-big" id="pfFaucet"></button>
-        <p class="note">The faucet drops free mock SOL into your wallet, valued at the live SOL price. Faucet funds never count as profit on the leaderboard — only your trading does.</p>
+        <p class="note">Add any amount of mock USD or SOL, as often as you like. Money you add is never counted as profit on the leaderboard. Only your trading is.</p>
+        <div class="dep-list" id="depositList"></div>
+      </div>
+      <div class="pf-mycoins panel pf-card">
+        <div class="sec-title"><h3>// MY COINS</h3><span class="muted" id="myCoinsCount"></span></div>
+        <div style="overflow-x:auto"><table class="trades-table mycoins" id="myCoins"></table></div>
       </div>
       <div class="pf-ach panel pf-card">
         <div class="sec-title"><h3>// ACHIEVEMENT SHOWCASE</h3><span class="muted" id="achCount"></span></div>
@@ -940,6 +987,14 @@ async function renderProfile() {
       </div>`;
     $('#logoutBtn').addEventListener('click', logout);
     $('#pfFaucet').addEventListener('click', claimFaucet);
+    $('#pfAddFunds').addEventListener('click', () => openFunds());
+    $('#editProfileBtn').addEventListener('click', openProfileEdit);
+    $('#myCoins').addEventListener('click', (e) => {
+      const rm = e.target.closest('[data-unwatch]');
+      if (rm) { e.stopPropagation(); toggleWatch(rm.dataset.unwatch); return; }
+      const row = e.target.closest('[data-open]');
+      if (row) location.hash = `coin/${row.dataset.open}`;
+    });
     $('#calPrev').addEventListener('click', () => { S.calMonth = new Date(S.calMonth.getFullYear(), S.calMonth.getMonth() - 1, 1); renderCalendar(); });
     $('#calNext').addEventListener('click', () => { S.calMonth = new Date(S.calMonth.getFullYear(), S.calMonth.getMonth() + 1, 1); renderCalendar(); });
     loadProfileData();
@@ -964,6 +1019,12 @@ function renderProfileLive() {
   const u = S.user;
   if (!u || !$('#pfStats')) return;
   $('#pfBadges').innerHTML = badgeIcons(u.badges);
+  $('#pfAvatar').innerHTML = avatarHtml(u, 'xl');
+  $('#pfBio').textContent = u.bio || 'No bio yet. Tap Edit profile to add one.';
+  $('#pfBio').classList.toggle('muted', !u.bio);
+  renderMyCoins();
+  $('#depositList').innerHTML = (u.deposits || []).length ? `<div class="k">RECENT TOP-UPS</div>${u.deposits.slice(0, 6).map((d) =>
+    `<div class="wallet-line"><span class="muted">${new Date(d.ts).toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${d.currency === 'SOL' ? fmtSol(d.amount) : fmtUsd(d.amount)}</span><b>+${fmtUsd(d.usdValue)}</b></div>`).join('')}` : '';
   const allTimePct = u.netDeposits > 0 ? (u.profit / u.netDeposits) * 100 : 0;
   $('#pfStats').innerHTML = [
     ['Portfolio value', fmtUsd(u.value), ''],
@@ -1066,6 +1127,159 @@ function renderCalFoot(pnl, m, days) {
 }
 setInterval(() => { if (S.view === 'profile') renderProfileLive(); }, 2000);
 setInterval(() => { if (S.view === 'profile' && S.user) loadProfileData(); }, 120_000);
+
+// ================= avatars =================
+function avatarHtml(u, size = '') {
+  const color = u?.color || `hsl(${hue(u?.username)} 90% 60%)`;
+  const inner = u?.avatar ? esc(u.avatar) : esc(String(u?.username || '?')[0].toUpperCase());
+  return `<span class="av ${size} ${u?.avatar ? 'emoji' : ''}" style="--avc:${esc(color)}">${inner}</span>`;
+}
+
+// ================= my coins (profile) =================
+function renderMyCoins() {
+  const box = $('#myCoins');
+  if (!box || !S.user) return;
+  const pos = S.user.positions || [];
+  const watch = (S.user.watchlist || []).map((w) => ({ ...w, ...(S.tokens.get(w.address) || {}) }));
+  $('#myCoinsCount').textContent = `${pos.length} holding · ${watch.length} watching`;
+  const head = `<thead><tr><th>Coin</th><th class="r">Price</th><th class="r">24h</th><th class="r hide-sm">Value</th><th class="r">PnL</th><th></th></tr></thead>`;
+  const holdRows = pos.map((p) => `<tr class="click" data-open="${esc(p.address)}">
+      <td><span class="mc-coin">${coinImg(p)}<b>${esc(p.symbol)}</b><span class="held-dot">HELD</span></span></td>
+      <td class="r">${fmtPrice(p.price)}</td><td class="r ${cls(S.tokens.get(p.address)?.change24h)}">${fmtPct(S.tokens.get(p.address)?.change24h, 1)}</td>
+      <td class="r hide-sm">${fmtUsd(p.value)}</td><td class="r ${cls(p.pnlUsd)}">${fmtUsd(p.pnlUsd, { sign: true })}<br><small>${fmtPct(p.pnlPct, 1)}</small></td><td></td></tr>`).join('');
+  const watchRows = watch.map((w) => `<tr class="click" data-open="${esc(w.address)}">
+      <td><span class="mc-coin">${coinImg(w)}<b>${esc(w.symbol)}</b><span class="star-on">★</span></span></td>
+      <td class="r">${fmtPrice(w.priceUsd)}</td><td class="r ${cls(w.change24h)}">${fmtPct(w.change24h, 1)}</td>
+      <td class="r hide-sm muted">MC ${fmtUsd(w.marketCap, { compact: true })}</td><td class="r muted">watching</td>
+      <td class="r"><button class="btn-ghost small" data-unwatch="${esc(w.address)}" aria-label="Stop watching ${esc(w.symbol)}">✕</button></td></tr>`).join('');
+  box.innerHTML = pos.length || watch.length ? head + `<tbody>${holdRows}${watchRows}</tbody>`
+    : `<tr><td class="muted" style="padding:20px 8px">No coins yet. Buy a coin, or open any coin and tap <b>☆ Watch</b> to track it here.</td></tr>`;
+}
+
+// ================= dialogs =================
+function openModal(id) { const m = $(id); m.hidden = false; return m; }
+function closeModal(m) { m.hidden = true; }
+document.addEventListener('click', (e) => {
+  const x = e.target.closest('[data-close]');
+  if (x) closeModal(x.closest('.modal'));
+  else if (e.target.matches?.('.modal[data-modal]')) closeModal(e.target);
+  const pl = e.target.closest('[data-player]');
+  if (pl) { e.preventDefault(); openPlayer(pl.dataset.player); }
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $$('.modal[data-modal]').forEach((m) => { m.hidden = true; }); });
+
+// ---- add funds ----
+let fundsCur = 'USD';
+function openFunds() {
+  if (!S.user) return openAuth('signup');
+  openModal('#fundsModal');
+  $('#fundsErr').textContent = '';
+  setFundsCur(fundsCur);
+  setTimeout(() => $('#fundsAmount').focus(), 30);
+}
+function setFundsCur(cur) {
+  fundsCur = cur;
+  $$('[data-fcur]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.fcur === cur));
+  $('#fundsPrefix').textContent = cur === 'USD' ? '$' : '◎';
+  $('#fundsAmount').placeholder = cur === 'USD' ? '10,000' : '50';
+  $('#fundsQuick').innerHTML = (cur === 'USD' ? [1000, 10000, 100000, 1000000] : [10, 100, 1000, 5000])
+    .map((v) => `<button type="button" data-famt="${v}">${cur === 'USD' ? '$' + (v >= 1e6 ? v / 1e6 + 'M' : v >= 1e3 ? v / 1e3 + 'K' : v) : '◎' + v.toLocaleString()}</button>`).join('');
+  updateFundsEst();
+}
+function updateFundsEst() {
+  const amt = Number(String($('#fundsAmount').value).replace(/,/g, ''));
+  const sol = S.sol || S.user?.solPrice || 0;
+  const usd = fundsCur === 'USD' ? amt : amt * sol;
+  const max = S.user?.maxDepositUsd || 1e6;
+  $('#fundsEst').innerHTML = !(amt > 0) ? `Up to ${fmtUsd(max, { compact: true })} per top-up. Top up as many times as you like.`
+    : `${fundsCur === 'SOL' ? `${fmtSol(amt)} ≈ <b>${fmtUsd(usd)}</b> at live SOL ${fmtUsd(sol)}` : `Adds <b>${fmtUsd(usd)}</b> mock USD`}`
+      + (usd > max ? `<br><span class="down">Too much for one top-up. Max is ${fmtUsd(max)}.</span>` : '');
+}
+$$('[data-fcur]').forEach((b) => b.addEventListener('click', () => setFundsCur(b.dataset.fcur)));
+$('#fundsQuick').addEventListener('click', (e) => { const b = e.target.closest('[data-famt]'); if (b) { $('#fundsAmount').value = b.dataset.famt; updateFundsEst(); } });
+$('#fundsAmount').addEventListener('input', () => { const el = $('#fundsAmount'); el.value = el.value.replace(/[^0-9.,]/g, ''); updateFundsEst(); });
+$('#fundsDrop').addEventListener('click', async () => { closeModal($('#fundsModal')); await claimFaucet(); });
+$('#fundsForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const amount = Number(String($('#fundsAmount').value).replace(/,/g, ''));
+  if (!(amount > 0)) { $('#fundsErr').textContent = 'Enter an amount to add.'; return; }
+  const btn = $('#fundsSubmit');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/deposit', { amount, currency: fundsCur });
+    S.user = r.user;
+    mergeWatchlist();
+    recomputeAccount();
+    renderAcct(); updateBalances(); updateEstimate();
+    if (S.view === 'profile') renderProfileLive();
+    closeModal($('#fundsModal'));
+    $('#fundsAmount').value = '';
+    toast(`💰 <b>+${fundsCur === 'USD' ? fmtUsd(r.deposit.amount) : fmtSol(r.deposit.amount)}</b> added to your wallet${fundsCur === 'SOL' ? `<br><span class="muted">≈ ${fmtUsd(r.deposit.usdValue)}</span>` : ''}`, 'info');
+  } catch (err) { $('#fundsErr').textContent = err.message; }
+  finally { btn.disabled = false; }
+});
+
+// ---- edit profile ----
+let peAvatar = null, peColor = null;
+async function openProfileEdit() {
+  if (!S.options) { try { S.options = await api('/api/options'); } catch (e) { return toast(esc(e.message), 'err'); } }
+  peAvatar = S.user.avatar; peColor = S.user.color;
+  $('#peBio').value = S.user.bio || '';
+  $('#peErr').textContent = '';
+  renderProfileEditor();
+  openModal('#profileModal');
+}
+function renderProfileEditor() {
+  const o = S.options;
+  $('#peAvatars').innerHTML = `<button type="button" role="radio" aria-checked="${!peAvatar}" data-av="" title="Use my initial">${esc(S.user.username[0].toUpperCase())}</button>`
+    + o.avatars.map((a) => `<button type="button" role="radio" aria-checked="${peAvatar === a}" data-av="${a}">${a}</button>`).join('');
+  $('#peColors').innerHTML = o.colors.map((c) => `<button type="button" role="radio" aria-checked="${peColor === c}" aria-label="Color ${c}" data-col="${c}" style="--sw:${c}"></button>`).join('');
+  $('#peCount').textContent = `${$('#peBio').value.length}/140`;
+  $('#pePreview').innerHTML = `${avatarHtml({ ...S.user, avatar: peAvatar, color: peColor }, 'xl')}<div><b>${esc(S.user.username)}</b><div class="muted">${esc($('#peBio').value) || 'Your bio shows here'}</div></div>`;
+}
+$('#peAvatars').addEventListener('click', (e) => { const b = e.target.closest('[data-av]'); if (b) { peAvatar = b.dataset.av || null; renderProfileEditor(); } });
+$('#peColors').addEventListener('click', (e) => { const b = e.target.closest('[data-col]'); if (b) { peColor = b.dataset.col; renderProfileEditor(); } });
+$('#peBio').addEventListener('input', renderProfileEditor);
+$('#profileForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('#peSave');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/profile', { avatar: peAvatar, color: peColor, bio: $('#peBio').value });
+    S.user = r.user;
+    closeModal($('#profileModal'));
+    renderProfileLive();
+    toast('<b>PROFILE SAVED</b>', 'info', 2000);
+  } catch (err) { $('#peErr').textContent = err.message; }
+  finally { btn.disabled = false; }
+});
+
+// ---- view a player's public profile ----
+async function openPlayer(username) {
+  const card = $('#playerCard');
+  card.innerHTML = `<button type="button" class="modal-x" data-close aria-label="Close">✕</button><div class="tape-empty">Loading ${esc(username)}…</div>`;
+  openModal('#playerModal');
+  try {
+    const p = await api(`/api/players/${encodeURIComponent(username)}`);
+    card.innerHTML = `<button type="button" class="modal-x" data-close aria-label="Close">✕</button>
+      <div class="pp-hero">${avatarHtml(p, 'xl')}<div>
+        <div class="pf-name"><span>${esc(p.username)}</span>${p.isMe ? '<span class="you-tag">YOU</span>' : ''}${badgeIcons(p.badges)}</div>
+        <div class="${p.bio ? '' : 'muted'}">${esc(p.bio || 'No bio yet.')}</div>
+        <div class="pf-meta">trading since ${new Date(p.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+      </div></div>
+      <div class="pp-stats">
+        <div><div class="k">All-time PnL</div><div class="v ${cls(p.profit)}">${fmtUsd(p.profit, { sign: true })}</div></div>
+        <div><div class="k">Portfolio</div><div class="v">${fmtUsd(p.value, { compact: true })}</div></div>
+        <div><div class="k">Trades</div><div class="v">${p.trades}</div></div>
+        <div><div class="k">Win rate</div><div class="v">${p.winRate == null ? '—' : Math.round(p.winRate) + '%'}</div></div>
+        <div><div class="k">Best trade</div><div class="v ${cls(p.bestTradePct)}">${p.bestTradePct == null ? '—' : fmtPct(p.bestTradePct, 0)}</div></div>
+      </div>
+      <div class="k pp-sub">OPEN POSITIONS</div>
+      ${p.positions.length ? p.positions.map((x) => `<a class="pp-pos" href="#coin/${esc(x.address)}" data-close>${coinImg(x)}<b>${esc(x.symbol)}</b><span>${fmtUsd(x.value)}</span><span class="${cls(x.pnlPct)}">${fmtPct(x.pnlPct, 1)}</span></a>`).join('') : '<div class="muted">None right now.</div>'}
+      <div class="k pp-sub">RECENT TRADES</div>
+      ${p.recentTrades.length ? p.recentTrades.map((t) => `<div class="pp-trade"><span class="${t.side === 'buy' ? 'up' : 'down'}">${t.side.toUpperCase()}</span><span>${esc(t.symbol)}</span><span>${fmtUsd(t.usdValue, { compact: true })}</span><span class="${cls(t.pnlPct)}">${t.side === 'sell' && t.pnlPct != null ? fmtPct(t.pnlPct, 0) : ''}</span><span class="muted">${ago(t.ts)} ago</span></div>`).join('') : '<div class="muted">No trades yet.</div>'}`;
+  } catch (e) { card.innerHTML = `<button type="button" class="modal-x" data-close aria-label="Close">✕</button><div class="tape-empty">${esc(e.message)}</div>`; }
+}
 
 // ================= auth =================
 let authMode = 'signup';
