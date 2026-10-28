@@ -43,6 +43,11 @@ const state = {
   seenTx: new Map(),   // address -> Set of tx hashes
   watchers: new Map(), // address -> count of viewers on that token
   liveFailures: 0,
+  pending: new Map(),  // big price jumps waiting for a second report
+  lastOwnOkAt: 0,      // last time the server fetched prices itself
+  lastRelayAt: 0,      // last time a player's browser sent prices
+  lastListsAt: 0,      // last time the trending list was refreshed
+  log: console.log,
 };
 
 // ---------- HTTP helpers ----------
@@ -214,7 +219,13 @@ async function refreshTrending() {
   // Pump.fun addresses first so they make the cut, then look up live stats for up to 90 coins.
   candidates.sort((a, b) => b.endsWith('pump') - a.endsWith('pump'));
   const pairs = await fetchDexTokens(candidates.slice(0, 90));
+  applyTrending(pairs, geckoList.status === 'fulfilled' ? 'geckoterminal+dexscreener' : 'dexscreener');
+}
+
+// Rank coins (Pump.fun first, then by 24h volume) from a Map of address -> DexScreener pair.
+function applyTrending(pairs, source) {
   const alive = [...pairs.values()].filter((p) => {
+    if (EXCLUDE.has(p.baseToken.address)) return false;
     if (!num(p.priceUsd)) return false;
     const onCurve = String(p.dexId).toLowerCase() === 'pumpfun'; // launch-curve coins report little/no liquidity
     return onCurve ? (p.volume?.h24 || 0) >= 5000 : (p.liquidity?.usd || 0) >= 5000;
@@ -238,7 +249,8 @@ async function refreshTrending() {
     });
   }
   state.trending = ranked.map((p) => p.baseToken.address);
-  state.trendingSource = geckoList.status === 'fulfilled' ? 'geckoterminal+dexscreener' : 'dexscreener';
+  state.trendingSource = source;
+  state.lastListsAt = now;
   events.emit('trending', state.trending);
 }
 
@@ -274,9 +286,19 @@ async function fetchDexTokens(addresses) {
   return out;
 }
 
+function trackedAddresses() {
+  const real = (a) => !a.startsWith('DEMO');
+  return [...new Set([...state.trending.filter(real), ...heldTokenAddresses().filter(real), ...[...state.watchers.keys()].filter(real), SOL_MINT])];
+}
+
 async function pollPrices() {
-  const tracked = new Set([...state.trending, ...heldTokenAddresses(), ...state.watchers.keys(), SOL_MINT]);
-  const pairs = await fetchDexTokens([...tracked]);
+  const pairs = await fetchDexTokens(trackedAddresses());
+  ingestPairs(pairs);
+  state.lastOwnOkAt = Date.now();
+}
+
+// Apply a Map of address -> DexScreener pair to live prices and candles.
+function ingestPairs(pairs) {
   const now = Date.now();
   const changed = [];
   for (const [addr, p] of pairs) {
@@ -456,8 +478,98 @@ function priceOf(address) {
   return t ? { price: t.priceUsd, updatedAt: t.updatedAt || 0 } : null;
 }
 
+// ---------- player-powered prices ----------
+// Free hosts share one internet address between many apps, so DexScreener/GeckoTerminal sometimes
+// answer "429 too many requests" to the server. When that happens, players' browsers (each with their
+// own address) fetch the same public data and send it here. The server prefers its own data whenever
+// it can get it, and only asks browsers for help while it's blocked.
+const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+function relayPlan() {
+  const now = Date.now();
+  if (CFG.mock) return { want: false };
+  const serverOk = now - (state.lastOwnOkAt || 0) < 15_000;
+  const justRelayed = now - (state.lastRelayAt || 0) < 2_500;
+  return {
+    want: !serverOk && !justRelayed,
+    addresses: trackedAddresses(),
+    needLists: !serverOk && now - (state.lastListsAt || 0) > 60_000,
+  };
+}
+
+function cleanPair(p) {
+  const addr = p?.baseToken?.address;
+  if (!p || p.chainId !== 'solana' || typeof addr !== 'string' || !BASE58.test(addr)) return null;
+  const price = num(p.priceUsd);
+  if (!(price > 0) || price > 1e9) return null;
+  const s = (v, n = 64) => (typeof v === 'string' ? v.slice(0, n) : undefined);
+  const img = s(p.info?.imageUrl, 300);
+  return {
+    chainId: 'solana', dexId: s(p.dexId, 32), pairAddress: BASE58.test(p.pairAddress || '') ? p.pairAddress : undefined,
+    baseToken: { address: addr, name: s(p.baseToken.name), symbol: s(p.baseToken.symbol, 24) },
+    priceUsd: String(price),
+    priceChange: { m5: num(p.priceChange?.m5), h1: num(p.priceChange?.h1), h24: num(p.priceChange?.h24) },
+    volume: { h24: num(p.volume?.h24) }, liquidity: { usd: num(p.liquidity?.usd) },
+    marketCap: num(p.marketCap), fdv: num(p.fdv),
+    txns: { m5: { buys: num(p.txns?.m5?.buys), sells: num(p.txns?.m5?.sells) } },
+    pairCreatedAt: num(p.pairCreatedAt), info: { imageUrl: img && /^https:\/\//.test(img) ? img : undefined },
+  };
+}
+
+function ingestRelay(body) {
+  if (CFG.mock) return { ok: false };
+  const now = Date.now();
+  const best = new Map();
+  for (const raw of Array.isArray(body?.pairs) ? body.pairs.slice(0, 600) : []) {
+    const p = cleanPair(raw);
+    if (!p) continue;
+    const prev = best.get(p.baseToken.address);
+    if (!prev || (p.liquidity.usd || 0) > (prev.liquidity.usd || 0)) best.set(p.baseToken.address, p);
+  }
+  // Spike guard: a sudden big jump from one report is held until a second report agrees with it,
+  // so one player can't instantly fake a price.
+  for (const [addr, p] of best) {
+    const cur = state.tokens.get(addr) || (addr === SOL_MINT ? { priceUsd: state.solPrice, updatedAt: state.solUpdatedAt } : null);
+    const np = num(p.priceUsd);
+    if (state.mode !== 'live') continue; // demo prices are made up, so there's nothing real to compare against
+    if (!cur?.priceUsd || now - (cur.updatedAt || 0) > 30_000) continue;
+    const ratio = np / cur.priceUsd;
+    if (ratio < 1.5 && ratio > 0.67) { state.pending.delete(addr); continue; }
+    const pend = state.pending.get(addr);
+    if (pend && Math.abs(pend.price / np - 1) < 0.1 && now - pend.at >= 5_000) { state.pending.delete(addr); continue; }
+    if (!pend || Math.abs(pend.price / np - 1) >= 0.1) state.pending.set(addr, { price: np, at: now });
+    best.delete(addr);
+  }
+  if (body?.pools && typeof body.pools === 'object') {
+    for (const [a, pool] of Object.entries(body.pools).slice(0, 100)) {
+      if (BASE58.test(a) && BASE58.test(String(pool)) && !state.tokens.get(a)?.pairAddress) upsertToken({ address: a, pairAddress: pool });
+    }
+  }
+  if (Array.isArray(body?.lists) && body.lists.length) {
+    const listed = new Set(body.lists.filter((a) => typeof a === 'string' && BASE58.test(a)).slice(0, 120));
+    const ranked = new Map([...best].filter(([a]) => listed.has(a)));
+    if (ranked.size) {
+      try { applyTrending(ranked, 'players'); } catch { /* not enough data yet */ }
+    }
+  }
+  ingestPairs(best);
+  state.lastRelayAt = now;
+  if (state.mode !== 'live' && state.solPrice && state.trending.length && !state.trending[0].startsWith('DEMO')) switchToLive('price data from players\' browsers');
+  return { ok: true, accepted: best.size };
+}
+
+let liveLoopsStarted = false;
+function switchToLive(why) {
+  clearInterval(state.demoTimer);
+  clearInterval(state.retryTimer);
+  state.mode = 'live';
+  state.log(`Market: LIVE (${why}).`);
+  events.emit('mode', 'live');
+  if (!liveLoopsStarted) runLiveLoops(state.log);
+}
+
 // ---------- start ----------
 async function start(log = console.log) {
+  state.log = log;
   hydrateFromDb();
   if (CFG.mock) {
     startDemo();
@@ -474,18 +586,13 @@ async function start(log = console.log) {
   } catch (e) {
     log(`Market: could not reach live data (${e.message}). Running DEMO market instead; will keep retrying.`);
     startDemo();
-    const demoTimer = setInterval(tickDemo, 1500);
-    const retry = setInterval(async () => {
+    state.demoTimer = setInterval(tickDemo, 1500);
+    state.retryTimer = setInterval(async () => {
       try {
         await refreshTrending();
         await pollPrices();
-        if (!state.solPrice) return;
-        clearInterval(demoTimer); clearInterval(retry);
-        state.mode = 'live';
-        log('Market: live data is back — switched to LIVE.');
-        events.emit('mode', 'live');
-        runLiveLoops(log);
-      } catch { /* keep demo running */ }
+        if (state.solPrice && state.mode !== 'live') switchToLive('server reached the price sites');
+      } catch { /* keep demo running until the server or a player's browser gets data */ }
     }, 60_000);
     return;
   }
@@ -493,15 +600,25 @@ async function start(log = console.log) {
 }
 
 function runLiveLoops(log) {
+  liveLoopsStarted = true;
   let pricesBusy = false;
+  let backoffUntil = 0;
   setInterval(async () => {
-    if (pricesBusy) return;
+    if (pricesBusy || Date.now() < backoffUntil) return;
     pricesBusy = true;
     try { await pollPrices(); state.liveFailures = 0; }
-    catch (e) { if (++state.liveFailures % 20 === 1) log('Price poll failed:', e.message); }
+    catch (e) {
+      // Being rate-limited: back off (up to 2 min) instead of hammering; players' browsers fill in meanwhile.
+      state.liveFailures++;
+      backoffUntil = Date.now() + Math.min(120_000, 5_000 * 2 ** Math.min(state.liveFailures, 5));
+      if (state.liveFailures === 1 || state.liveFailures % 20 === 0) log('Price poll failed:', e.message, '— players\' browsers will supply prices meanwhile.');
+    }
     finally { pricesBusy = false; }
   }, CFG.pricePollMs);
-  setInterval(() => refreshTrending().catch((e) => log('Trending refresh failed:', e.message)), CFG.trendingRefreshMs);
+  setInterval(() => {
+    if (Date.now() - (state.lastOwnOkAt || 0) > 60_000 && Date.now() - (state.lastRelayAt || 0) < 60_000) return; // blocked; players cover it
+    refreshTrending().catch((e) => log('Trending refresh failed:', e.message));
+  }, CFG.trendingRefreshMs);
   let tapeBusy = false;
   setInterval(async () => {
     if (tapeBusy) return;
@@ -511,7 +628,7 @@ function runLiveLoops(log) {
 }
 
 module.exports = {
-  start, events, snapshot, publicToken, priceOf, lookupToken, getCandles, watch,
+  start, events, snapshot, publicToken, priceOf, lookupToken, getCandles, watch, relayPlan, ingestRelay,
   get solPrice() { return state.solPrice; },
   get solUpdatedAt() { return state.solUpdatedAt; },
   get mode() { return state.mode; },
