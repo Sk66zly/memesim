@@ -498,6 +498,40 @@ async function lookupNewCoin(address) {
   return t;
 }
 
+// ---------- top holders (optional) ----------
+// Free public Solana nodes refuse "largest holders" lookups, so this only works when SOLANA_RPC_URL points
+// at a node with a key (e.g. a free Helius or QuickNode endpoint). Without it the site shows holder counts only.
+const RPC_URL = process.env.SOLANA_RPC_URL || '';
+const holderCache = new Map();
+async function rpc(method, params) {
+  const res = await fetch(RPC_URL, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(10_000),
+  });
+  const j = await res.json();
+  if (j.error) throw new Error(j.error.message || 'RPC error');
+  return j.result;
+}
+async function topHolders(mint) {
+  if (!RPC_URL || !BASE58.test(mint)) return null;
+  const hit = holderCache.get(mint);
+  if (hit && Date.now() - hit.at < 60_000) return hit.data;
+  const [largest, supply] = await Promise.all([rpc('getTokenLargestAccounts', [mint, { commitment: 'confirmed' }]), rpc('getTokenSupply', [mint])]);
+  const accts = (largest?.value || []).slice(0, 20);
+  const owners = accts.length ? await rpc('getMultipleAccounts', [accts.map((a) => a.address), { encoding: 'jsonParsed' }]) : { value: [] };
+  const total = Number(supply?.value?.uiAmount) || 0;
+  const merged = new Map();
+  accts.forEach((a, i) => {
+    const owner = owners.value?.[i]?.data?.parsed?.info?.owner || a.address;
+    merged.set(owner, (merged.get(owner) || 0) + (Number(a.uiAmount) || 0));
+  });
+  const holders = [...merged].map(([owner, amount]) => ({ owner, amount, pct: total ? (amount / total) * 100 : 0 })).sort((x, y) => y.amount - x.amount);
+  const data = { holders, supply: total };
+  holderCache.set(mint, { at: Date.now(), data });
+  if (holderCache.size > 500) holderCache.delete(holderCache.keys().next().value);
+  return data;
+}
+
 // ---------- on-chain trade tape for tokens people are watching ----------
 async function pollTape() {
   const watched = [...state.watchers.entries()].filter(([, n]) => n > 0).map(([a]) => a);
@@ -517,6 +551,8 @@ async function pollTape() {
           id, side: a.kind === 'sell' ? 'sell' : 'buy', usd: num(a.volume_in_usd) || 0,
           price: num(a.kind === 'sell' ? a.price_from_in_usd : a.price_to_in_usd),
           wallet: a.tx_from_address ? `${a.tx_from_address.slice(0, 4)}…${a.tx_from_address.slice(-4)}` : '',
+          trader: typeof a.tx_from_address === 'string' ? a.tx_from_address.slice(0, 64) : '',
+          qty: num(a.kind === 'sell' ? a.from_token_amount : a.to_token_amount) || 0,
           ts: a.block_timestamp ? Date.parse(a.block_timestamp) : Date.now(),
         });
       }
@@ -781,6 +817,7 @@ module.exports = {
   get solPrice() { return state.solPrice; },
   get solUpdatedAt() { return state.solUpdatedAt; },
   get mode() { return state.mode; },
+  topHolders,
   feedStatus: () => ({ source: state.trendingSource || null, pumpFun: { ok: pumpState.ok, coins: pumpState.list.length, ageSec: pumpState.at ? Math.round((Date.now() - pumpState.at) / 1000) : null, endpoint: pumpState.endpoint, error: pumpState.error } }),
   tapeFor: (a) => state.tape.get(a) || [],
   tokenInfo: (a) => publicToken(state.tokens.get(a)),
