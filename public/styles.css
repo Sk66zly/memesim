@@ -125,6 +125,11 @@ main { padding: 12px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); 
 .coin-main { min-width: 0; }
 .coin-sym { font-weight: 800; font-size: 13px; display: flex; align-items: center; gap: 6px; }
 .coin-sub { color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pump-tag { font-size: 9px; color: #000; background: #5ff2a0; padding: 0 4px; font-weight: 800; letter-spacing: .5px; box-shadow: 0 0 8px #5ff2a066; }
+.ext-links { display: inline-flex; gap: 8px; margin-left: 6px; }
+.ext-links a { color: var(--cyan); text-decoration: none; font-size: 10.5px; }
+.ext-links a:hover { text-decoration: underline; }
+.tok-name { max-width: none !important; white-space: normal !important; }
 .held-dot { font-size: 9px; color: #000; background: var(--up); padding: 0 4px; font-weight: 800; }
 .coin-right { text-align: right; }
 .coin-price { font-weight: 700; font-variant-numeric: tabular-nums; }
