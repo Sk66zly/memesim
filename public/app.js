@@ -143,7 +143,8 @@ function connectStream() {
     if (d.sol) S.sol = d.sol;
     S.trending = d.tokens.map((t) => t.address);
     S.source = d.source || null;
-    $('#listTitle').textContent = S.source === 'pump.fun' ? 'Trending on pump.fun' : 'Trending on Solana';
+    const allPump = d.tokens.length && d.tokens.every((t) => t.isPump);
+    $('#listTitle').textContent = S.source === 'pump.fun' || allPump ? 'Trending on pump.fun' : 'Trending on Solana';
     for (const t of d.tokens) S.tokens.set(t.address, { ...S.tokens.get(t.address), ...t });
     renderCoinList();
     renderTicker();
@@ -1078,13 +1079,15 @@ async function relayTick() {
   try {
     const plan = await api('/api/relay/plan');
     S.serverBlocked = !!plan.serverBlocked;
-    if (!plan.want) return;
+    const wantLists = plan.needLists && Date.now() - lastListsFetch > 18_000;
+    if (!plan.want && !wantLists) return;
     const body = {};
-    let addrs = plan.addresses || [];
-    if (plan.needLists && Date.now() - lastListsFetch > 55_000) {
+    let addrs = plan.want ? (plan.addresses || []) : [];
+    if (wantLists) {
       lastListsFetch = Date.now();
+      // "Trending in the last 5 minutes" from GeckoTerminal; the server keeps the pump.fun coins.
       const [gt, top, latest, prof] = await Promise.allSettled([
-        getJ(`${GT}/networks/solana/trending_pools?include=base_token&page=1`),
+        getJ(`${GT}/networks/solana/trending_pools?include=base_token&duration=5m&page=1`),
         getJ(`${DEX}/token-boosts/top/v1`), getJ(`${DEX}/token-boosts/latest/v1`), getJ(`${DEX}/token-profiles/latest/v1`),
       ]);
       const cand = []; const seen = new Set(); const pools = {};
@@ -1098,8 +1101,8 @@ async function relayTick() {
         }
       }
       for (const l of [top, latest, prof]) if (l.status === 'fulfilled' && Array.isArray(l.value)) for (const b of l.value) if (b?.chainId === 'solana') add(b.tokenAddress);
-      cand.sort((a, b) => b.endsWith('pump') - a.endsWith('pump'));
-      body.lists = cand.slice(0, 90);
+      const ordered = cand.filter((a) => a.endsWith('pump')).concat(cand.filter((a) => !a.endsWith('pump')));
+      body.lists = ordered.slice(0, 90);
       body.pools = pools;
       addrs = [...new Set([...addrs, ...body.lists])];
     }
