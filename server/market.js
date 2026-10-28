@@ -21,7 +21,7 @@ const CFG = {
   mock: process.env.MOCK_MARKET === '1',
   trendingCount: Number(process.env.TRENDING_COUNT || 20),
   pricePollMs: Number(process.env.PRICE_POLL_MS || 2500),
-  trendingRefreshMs: 120_000,
+  trendingRefreshMs: 8_000, // pump.fun's board; the slower fallback lists throttle themselves to once a minute
   maxCandles: 1500, // 1-minute candles kept per token (~25h)
 };
 
@@ -194,10 +194,79 @@ async function ensureHistory(address) {
 const PUMP_DEXES = new Set(['pumpfun', 'pumpswap', 'pump-fun']);
 const isPumpCoin = (address, dexId) => address.endsWith('pump') || PUMP_DEXES.has(String(dexId || '').toLowerCase());
 
+// ---------- pump.fun's own trending board ----------
+// pump.fun's website reads from these endpoints. Browsers can't call them from another site, but the server can.
+// We try a few in order and use whichever answers, so a renamed endpoint just falls back to the next one.
+const PUMP_API = 'https://frontend-api-v3.pump.fun';
+const PUMP_LISTS = [
+  '/coins/for-you?offset=0&limit=50&includeNsfw=false',
+  '/coins/currently-live?offset=0&limit=50&includeNsfw=false',
+  '/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false',
+];
+const pumpState = { ok: false, list: [], at: 0, endpoint: null, error: null, pausedUntil: 0 };
+
+async function pumpGet(path) {
+  const res = await fetch(PUMP_API + path, {
+    headers: { accept: 'application/json', origin: 'https://pump.fun', referer: 'https://pump.fun/', 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36' },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!res.ok) throw new Error(`${res.status} from pump.fun`);
+  return res.json();
+}
+
+function pumpCoins(json) {
+  const raw = Array.isArray(json) ? json : (json?.coins || json?.data || json?.results || []);
+  const out = [];
+  for (const r of Array.isArray(raw) ? raw : []) {
+    const c = r?.coin || r;
+    const mint = c?.mint || c?.address || c?.coinMint;
+    if (typeof mint !== 'string' || !BASE58.test(mint) || EXCLUDE.has(mint)) continue;
+    const mcap = num(c.usd_market_cap ?? c.usdMarketCap ?? c.marketCap);
+    const supply = (num(c.total_supply) || 1e15) / 1e6; // pump.fun coins: 1 billion tokens, 6 decimals
+    out.push({
+      address: mint, symbol: typeof c.symbol === 'string' ? c.symbol.slice(0, 24) : undefined,
+      name: typeof c.name === 'string' ? c.name.slice(0, 64) : undefined,
+      image: typeof c.image_uri === 'string' && /^https:\/\//.test(c.image_uri) ? c.image_uri.slice(0, 300) : undefined,
+      marketCap: mcap, priceUsd: mcap && supply ? mcap / supply : null,
+      createdAt: num(c.created_timestamp) || undefined,
+    });
+  }
+  return out;
+}
+
+async function refreshPumpFun() {
+  if (Date.now() < pumpState.pausedUntil) return pumpState.ok ? pumpState.list : [];
+  const order = pumpState.endpoint ? [pumpState.endpoint, ...PUMP_LISTS.filter((p) => p !== pumpState.endpoint)] : PUMP_LISTS;
+  let lastErr;
+  for (const path of order) {
+    try {
+      const coins = pumpCoins(await pumpGet(path));
+      if (coins.length < 5) throw new Error('pump.fun list was empty');
+      Object.assign(pumpState, { ok: true, list: coins, at: Date.now(), endpoint: path, error: null });
+      return coins;
+    } catch (e) { lastErr = e; if (/^(403|429)/.test(e.message)) break; }
+  }
+  pumpState.ok = Date.now() - pumpState.at < 120_000 && pumpState.list.length > 0;
+  pumpState.error = lastErr?.message || 'unavailable';
+  pumpState.pausedUntil = Date.now() + (/^(403|429)/.test(pumpState.error) ? 120_000 : 20_000);
+  return pumpState.ok ? pumpState.list : [];
+}
+
 async function refreshTrending() {
   const candidates = [];
   const seen = new Set();
   const add = (a) => { if (a && !EXCLUDE.has(a) && !seen.has(a)) { seen.add(a); candidates.push(a); } };
+
+  // pump.fun's own board, in pump.fun's order. DexScreener adds volume/liquidity/charts where it knows the
+  // coin; brand-new coins it hasn't indexed yet still show, priced from pump.fun's market cap.
+  const pumpList = await refreshPumpFun().catch(() => []);
+  if (pumpList.length) {
+    const pairs = await fetchDexTokens(pumpList.slice(0, 60).map((c) => c.address)).catch(() => new Map());
+    try { applyPumpTrending(pumpList, pairs); return; } catch { /* fall back to the DexScreener lists */ }
+  }
+  // Fallback lists are slower-moving and rate-limited, so refresh them at most once a minute.
+  if (Date.now() - (state.lastDexListsAt || 0) < 60_000 && state.trending.length) return;
+  state.lastDexListsAt = Date.now();
 
   const [geckoList, ...dexLists] = await Promise.allSettled([
     geckoTrendingAddresses(),
@@ -220,6 +289,33 @@ async function refreshTrending() {
   candidates.sort((a, b) => b.endsWith('pump') - a.endsWith('pump'));
   const pairs = await fetchDexTokens(candidates.slice(0, 90));
   applyTrending(pairs, geckoList.status === 'fulfilled' ? 'geckoterminal+dexscreener' : 'dexscreener');
+}
+
+function applyPumpTrending(pumpList, pairs) {
+  const now = Date.now();
+  const ranked = [];
+  for (const c of pumpList) {
+    if (ranked.length >= CFG.trendingCount) break;
+    const p = pairs.get(c.address);
+    if (p && num(p.priceUsd)) {
+      upsertToken({
+        address: c.address, symbol: p.baseToken.symbol || c.symbol, name: p.baseToken.name || c.name, image: p.info?.imageUrl || c.image,
+        pairAddress: state.tokens.get(c.address)?.pairAddress || p.pairAddress, dexId: p.dexId, isPump: true, priceUsd: num(p.priceUsd),
+        change5m: num(p.priceChange?.m5), change1h: num(p.priceChange?.h1), change24h: num(p.priceChange?.h24),
+        volume24h: num(p.volume?.h24), liquidity: num(p.liquidity?.usd), marketCap: num(p.marketCap) || num(p.fdv) || c.marketCap,
+        buys5m: p.txns?.m5?.buys, sells5m: p.txns?.m5?.sells, createdAt: p.pairCreatedAt || c.createdAt, updatedAt: now,
+      });
+    } else if (c.priceUsd) {
+      upsertToken({ ...c, isPump: true, updatedAt: now });
+      pushPriceToCandles(c.address, c.priceUsd, now);
+    } else continue;
+    ranked.push(c.address);
+  }
+  if (ranked.length < 5) throw new Error('pump.fun list had too few priced coins');
+  state.trending = ranked;
+  state.trendingSource = 'pump.fun';
+  state.lastListsAt = now;
+  events.emit('trending', state.trending);
 }
 
 // Rank coins (Pump.fun first, then by 24h volume) from a Map of address -> DexScreener pair.
@@ -355,11 +451,11 @@ function persistHeld() {
 
 // Look up a token that isn't on the trending list (e.g. pasted address)
 async function lookupToken(address) {
-  if (state.tokens.get(address)?.priceUsd && Date.now() - state.tokens.get(address).updatedAt < 60_000) return state.tokens.get(address);
-  if (state.mode !== 'live') return state.tokens.get(address) || null;
-  const pairs = await fetchDexTokens([address]);
-  const p = pairs.get(address);
-  if (!p) return state.tokens.get(address) || null;
+  const cur = state.tokens.get(address);
+  if (cur?.priceUsd && Date.now() - cur.updatedAt < 60_000) return cur;
+  if (CFG.mock || String(address).startsWith('DEMO') || !BASE58.test(address)) return cur || null;
+  const p = (await fetchDexTokens([address]).catch(() => new Map())).get(address);
+  if (!p) return (await lookupNewCoin(address).catch(() => null)) || cur || null;
   const t = upsertToken({
     address, symbol: p.baseToken.symbol, name: p.baseToken.name, image: p.info?.imageUrl,
     pairAddress: p.pairAddress, priceUsd: num(p.priceUsd), change24h: num(p.priceChange?.h24),
@@ -367,6 +463,32 @@ async function lookupToken(address) {
     liquidity: num(p.liquidity?.usd), marketCap: num(p.marketCap) || num(p.fdv), updatedAt: Date.now(),
   });
   pushPriceToCandles(address, t.priceUsd);
+  return t;
+}
+
+// Coins DexScreener hasn't listed yet (brand-new pump.fun launches): ask pump.fun, then GeckoTerminal.
+async function lookupNewCoin(address) {
+  const now = Date.now();
+  try {
+    const c = pumpCoins([await pumpGet(`/coins/${address}`)])[0];
+    if (c?.priceUsd) {
+      const t = upsertToken({ ...c, isPump: true, dexId: 'pumpfun', updatedAt: now });
+      pushPriceToCandles(address, t.priceUsd, now);
+      return t;
+    }
+  } catch { /* pump.fun unreachable from here */ }
+  const j = await gecko(`/networks/solana/tokens/${address}?include=top_pools`);
+  const a = j?.data?.attributes;
+  const price = num(a?.price_usd);
+  if (!price) return null;
+  const pool = (j.data.relationships?.top_pools?.data?.[0]?.id || '').replace(/^solana_/, '');
+  const t = upsertToken({
+    address, symbol: typeof a.symbol === 'string' ? a.symbol.slice(0, 24) : '?', name: typeof a.name === 'string' ? a.name.slice(0, 64) : '',
+    image: /^https:\/\//.test(a.image_url || '') ? a.image_url : undefined, pairAddress: BASE58.test(pool) ? pool : undefined,
+    priceUsd: price, marketCap: num(a.market_cap_usd) || num(a.fdv_usd), volume24h: num(a.volume_usd?.h24),
+    isPump: address.endsWith('pump'), updatedAt: now,
+  });
+  pushPriceToCandles(address, price, now);
   return t;
 }
 
@@ -483,7 +605,7 @@ function sparkFor(address) {
 }
 function snapshot() {
   return {
-    mode: state.mode, sol: state.solPrice,
+    mode: state.mode, sol: state.solPrice, source: state.trendingSource || null,
     tokens: state.trending.map((a) => { const t = publicToken(state.tokens.get(a)); return t && { ...t, spark: sparkFor(a) }; }).filter(Boolean),
   };
 }
@@ -507,7 +629,7 @@ function relayPlan() {
     want: !serverOk && !justRelayed,
     serverBlocked: !serverOk,   // viewers should also send their 1-second price for the coin they have open
     addresses: trackedAddresses(),
-    needLists: !serverOk && now - (state.lastListsAt || 0) > 60_000,
+    needLists: !serverOk && !pumpState.ok && now - (state.lastListsAt || 0) > 60_000,
   };
 }
 
@@ -559,7 +681,7 @@ function ingestRelay(body) {
       if (BASE58.test(a) && BASE58.test(String(pool)) && !state.tokens.get(a)?.pairAddress) upsertToken({ address: a, pairAddress: pool });
     }
   }
-  if (Array.isArray(body?.lists) && body.lists.length) {
+  if (Array.isArray(body?.lists) && body.lists.length && !(pumpState.ok && Date.now() - pumpState.at < 60_000)) {
     const listed = new Set(body.lists.filter((a) => typeof a === 'string' && BASE58.test(a)).slice(0, 120));
     const ranked = new Map([...best].filter(([a]) => listed.has(a)));
     if (ranked.size) {
@@ -631,9 +753,13 @@ function runLiveLoops(log) {
     }
     finally { pricesBusy = false; }
   }, CFG.pricePollMs);
-  setInterval(() => {
-    if (Date.now() - (state.lastOwnOkAt || 0) > 60_000 && Date.now() - (state.lastRelayAt || 0) < 60_000) return; // blocked; players cover it
-    refreshTrending().catch((e) => log('Trending refresh failed:', e.message));
+  let trendBusy = false;
+  setInterval(async () => {
+    if (trendBusy) return;
+    trendBusy = true;
+    try { await refreshTrending(); }
+    catch (e) { if (state.lastTrendErr !== e.message) { state.lastTrendErr = e.message; log('Trending refresh failed:', e.message); } }
+    finally { trendBusy = false; }
   }, CFG.trendingRefreshMs);
   let tapeBusy = false;
   setInterval(async () => {
@@ -648,6 +774,7 @@ module.exports = {
   get solPrice() { return state.solPrice; },
   get solUpdatedAt() { return state.solUpdatedAt; },
   get mode() { return state.mode; },
+  feedStatus: () => ({ source: state.trendingSource || null, pumpFun: { ok: pumpState.ok, coins: pumpState.list.length, ageSec: pumpState.at ? Math.round((Date.now() - pumpState.at) / 1000) : null, endpoint: pumpState.endpoint, error: pumpState.error } }),
   tapeFor: (a) => state.tape.get(a) || [],
   tokenInfo: (a) => publicToken(state.tokens.get(a)),
   SOL_MINT,
