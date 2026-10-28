@@ -165,6 +165,24 @@ async function api(req, res, url) {
     return send(res, 200, game.snapshotsFor(needUser().id, Date.now() - days * 864e5));
   }
   if (p === '/api/faucet' && m === 'POST') return send(res, 200, game.faucet(needUser().id));
+  if (p === '/api/deposit' && m === 'POST') {
+    const u = needUser();
+    if (!rateLimit(`deposit:${u.id}`, 30, 60_000)) throw new game.GameError('Slow down — too many top-ups per minute.', 429);
+    const r = game.deposit(u.id, await readBody(req));
+    return send(res, 200, { deposit: r, user: game.account(u.id) });
+  }
+  if (p === '/api/profile' && m === 'POST') {
+    const u = needUser();
+    game.updateProfile(u.id, await readBody(req));
+    return send(res, 200, { user: game.account(u.id) });
+  }
+  if (p === '/api/watchlist' && m === 'POST') {
+    const u = needUser();
+    if (!rateLimit(`watch:${u.id}`, 60, 60_000)) throw new game.GameError('Slow down a little.', 429);
+    return send(res, 200, { watchlist: game.setWatch(u.id, await readBody(req)) });
+  }
+  if (p === '/api/options' && m === 'GET') return send(res, 200, { avatars: game.AVATARS, colors: game.COLORS, maxDepositUsd: game.CFG.maxDepositUsd });
+  if ((match = p.match(/^\/api\/players\/([A-Za-z0-9_]{3,16})$/)) && m === 'GET') return send(res, 200, game.publicProfile(match[1], user?.id));
   if (p === '/api/trade' && m === 'POST') {
     const u = needUser();
     if (!rateLimit(`trade:${u.id}`, 40, 60_000)) throw new game.GameError('Slow down — too many trades per minute.', 429);
