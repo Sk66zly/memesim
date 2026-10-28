@@ -1,0 +1,22 @@
+# Render Blueprint — lets Render set up MemeSim automatically.
+# Free plan: the site sleeps after 15 min with no visitors. Player data is kept in your free
+# Turso database, so nothing resets. Render will ask you for the two TURSO_ values.
+services:
+  - type: web
+    name: memesim
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22.13.0"
+      - key: SECURE_COOKIES
+        value: "1"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
