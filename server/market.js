@@ -264,8 +264,11 @@ async function refreshTrending() {
     const pairs = await fetchDexTokens(pumpList.slice(0, 60).map((c) => c.address)).catch(() => new Map());
     try { applyPumpTrending(pumpList, pairs); return; } catch { /* fall back to the DexScreener lists */ }
   }
-  // Fallback lists are slower-moving and rate-limited, so refresh them at most once a minute.
-  if (Date.now() - (state.lastDexListsAt || 0) < 60_000 && state.trending.length) return;
+  // pump.fun blocks cloud servers, so the usual source is GeckoTerminal's "trending in the last 5 minutes"
+  // list, keeping pump.fun coins. Players' browsers send the same list every ~20s (see relayPlan);
+  // the server tries itself at most every 20s too (GeckoTerminal rate-limits shared hosts).
+  if (Date.now() - (state.lastDexListsAt || 0) < 20_000 && state.trending.length) return;
+  if (Date.now() - (state.lastListsAt || 0) < 15_000 && state.trending.length) return;
   state.lastDexListsAt = Date.now();
 
   const [geckoList, ...dexLists] = await Promise.allSettled([
@@ -285,10 +288,10 @@ async function refreshTrending() {
   }
   if (!candidates.length) throw new Error('no trending sources reachable');
 
-  // Pump.fun addresses first so they make the cut, then look up live stats for up to 90 coins.
-  candidates.sort((a, b) => b.endsWith('pump') - a.endsWith('pump'));
-  const pairs = await fetchDexTokens(candidates.slice(0, 90));
-  applyTrending(pairs, geckoList.status === 'fulfilled' ? 'geckoterminal+dexscreener' : 'dexscreener');
+  // Pump.fun addresses first (keeping trend order) so they make the cut, then look up live stats for up to 90 coins.
+  const order = candidates.filter((a) => a.endsWith('pump')).concat(candidates.filter((a) => !a.endsWith('pump')));
+  const pairs = await fetchDexTokens(order.slice(0, 90));
+  applyTrending(pairs, geckoList.status === 'fulfilled' ? 'geckoterminal' : 'dexscreener', order);
 }
 
 function applyPumpTrending(pumpList, pairs) {
@@ -318,18 +321,21 @@ function applyPumpTrending(pumpList, pairs) {
   events.emit('trending', state.trending);
 }
 
-// Rank coins (Pump.fun first, then by 24h volume) from a Map of address -> DexScreener pair.
-function applyTrending(pairs, source) {
+// Rank coins from a Map of address -> DexScreener pair: pump.fun coins only (topped up with other Solana
+// coins if there are too few), in trending order, then by trades in the last 5 minutes.
+function applyTrending(pairs, source, order = []) {
   const alive = [...pairs.values()].filter((p) => {
     if (EXCLUDE.has(p.baseToken.address)) return false;
     if (!num(p.priceUsd)) return false;
     const onCurve = String(p.dexId).toLowerCase() === 'pumpfun'; // launch-curve coins report little/no liquidity
     return onCurve ? (p.volume?.h24 || 0) >= 5000 : (p.liquidity?.usd || 0) >= 5000;
   });
-  const byVol = (a, b) => (b.volume?.h24 || 0) - (a.volume?.h24 || 0);
-  const pump = alive.filter((p) => isPumpCoin(p.baseToken.address, p.dexId)).sort(byVol);
-  const other = alive.filter((p) => !isPumpCoin(p.baseToken.address, p.dexId)).sort(byVol);
-  const ranked = pump.concat(other).slice(0, CFG.trendingCount);
+  const rank = new Map(order.map((a, i) => [a, i]));
+  const act = (p) => (p.txns?.m5?.buys || 0) + (p.txns?.m5?.sells || 0);
+  const byTrend = (a, b) => (rank.get(a.baseToken.address) ?? 1e6) - (rank.get(b.baseToken.address) ?? 1e6) || act(b) - act(a) || (b.volume?.h24 || 0) - (a.volume?.h24 || 0);
+  const pump = alive.filter((p) => isPumpCoin(p.baseToken.address, p.dexId)).sort(byTrend);
+  const other = alive.filter((p) => !isPumpCoin(p.baseToken.address, p.dexId)).sort(byTrend);
+  const ranked = (pump.length >= 10 ? pump : pump.concat(other)).slice(0, CFG.trendingCount);
   if (!ranked.length) throw new Error('no actively traded Solana coins found');
 
   const now = Date.now();
@@ -352,7 +358,7 @@ function applyTrending(pairs, source) {
 
 // Addresses from GeckoTerminal's Solana trending pools (also remembers each coin's pool for chart history).
 async function geckoTrendingAddresses() {
-  const json = await gecko('/networks/solana/trending_pools?include=base_token&page=1');
+  const json = await gecko('/networks/solana/trending_pools?include=base_token&duration=5m&page=1');
   const included = new Map((json.included || []).map((x) => [x.id, x.attributes || {}]));
   const out = [];
   for (const pool of json.data || []) {
@@ -629,7 +635,7 @@ function relayPlan() {
     want: !serverOk && !justRelayed,
     serverBlocked: !serverOk,   // viewers should also send their 1-second price for the coin they have open
     addresses: trackedAddresses(),
-    needLists: !serverOk && !pumpState.ok && now - (state.lastListsAt || 0) > 60_000,
+    needLists: !pumpState.ok && now - (state.lastListsAt || 0) > 20_000,
   };
 }
 
@@ -682,10 +688,11 @@ function ingestRelay(body) {
     }
   }
   if (Array.isArray(body?.lists) && body.lists.length && !(pumpState.ok && Date.now() - pumpState.at < 60_000)) {
-    const listed = new Set(body.lists.filter((a) => typeof a === 'string' && BASE58.test(a)).slice(0, 120));
+    const order = body.lists.filter((a) => typeof a === 'string' && BASE58.test(a)).slice(0, 120);
+    const listed = new Set(order);
     const ranked = new Map([...best].filter(([a]) => listed.has(a)));
-    if (ranked.size) {
-      try { applyTrending(ranked, 'players'); } catch { /* not enough data yet */ }
+    if (ranked.size >= 5) {
+      try { applyTrending(ranked, 'geckoterminal', order); } catch { /* not enough data yet */ }
     }
   }
   ingestPairs(best);
