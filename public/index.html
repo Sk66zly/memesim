@@ -23,9 +23,9 @@
     <div class="topbar-row">
       <a class="logo" href="#trending" aria-label="MemeSim home"><span class="logo-mark" aria-hidden="true">m$</span><span class="logo-word">memesim</span></a>
       <nav class="tabs" role="tablist" aria-label="Main">
-        <button class="tab" role="tab" data-view="trending" aria-selected="true"><span class="tab-ico" aria-hidden="true">🔥</span>Trending</button>
-        <button class="tab" role="tab" data-view="leaderboard" aria-selected="false"><span class="tab-ico" aria-hidden="true">🏆</span>Leaderboard</button>
-        <button class="tab" role="tab" data-view="profile" aria-selected="false"><span class="tab-ico" aria-hidden="true">👤</span>Profile</button>
+        <button class="tab" role="tab" data-view="trending" aria-selected="true">Explore</button>
+        <button class="tab" role="tab" data-view="leaderboard" aria-selected="false">Leaderboard</button>
+        <button class="tab" role="tab" data-view="profile" aria-selected="false">Portfolio</button>
       </nav>
       <form class="search" id="caSearch" role="search">
         <span class="search-ico" aria-hidden="true">⌕</span>
@@ -33,7 +33,7 @@
       </form>
       <div class="acct" id="acct"></div>
     </div>
-    <div class="ticker" aria-label="Live activity">
+    <div class="ticker" aria-label="Trending coins">
       <span class="live-dot" id="modeBadge">LIVE</span>
       <div class="ticker-track"><div class="ticker-inner" id="ticker"></div></div>
     </div>
@@ -70,44 +70,53 @@
                 <div class="tok-title"><span class="tok-sym" id="tokSym"></span><span class="tok-name" id="tokName"></span></div>
                 <div class="tok-meta" id="tokMeta"></div>
               </div>
-              <button class="watch-btn" id="watchBtn" type="button" aria-pressed="false">☆ Watch</button>
+              <button class="watch-btn" id="watchBtn" type="button" aria-pressed="false" title="Add to watchlist">☆</button>
               <div class="tok-figures">
                 <div class="fig"><span class="k">Market cap</span><span class="v big" id="tokMcap">—</span></div>
                 <div class="fig"><span class="k">Price</span><span class="v" id="tokPrice">—</span></div>
-                <div class="fig hide-sm"><span class="k">24h vol</span><span class="v" id="tokVol">—</span></div>
                 <div class="fig"><span class="k">24h</span><span class="v" id="tokChg">—</span></div>
+                <div class="fig hide-sm"><span class="k">24h vol</span><span class="v" id="tokVol">—</span></div>
+                <div class="fig hide-sm"><span class="k">Holders</span><span class="v" id="tokHolders">—</span></div>
+                <div class="fig hide-sm"><span class="k">ATH</span><span class="v" id="tokAth">—</span></div>
               </div>
             </div>
 
             <div class="chart-card card">
               <div class="chart-bar">
-                <div class="seg" role="group" aria-label="Chart view">
-                  <button class="tf" data-tf="live" aria-pressed="true"><span class="live-pip" aria-hidden="true"></span>Live</button>
-                  <button class="tf" data-tf="1" aria-pressed="false">1m</button>
-                  <button class="tf" data-tf="5" aria-pressed="false">5m</button>
-                  <button class="tf" data-tf="15" aria-pressed="false">15m</button>
-                  <button class="tf" data-tf="60" aria-pressed="false">1h</button>
+                <div class="tfs" role="group" aria-label="Candle size">
+                  <button class="tf" data-tf="1" aria-pressed="true">1s</button>
+                  <button class="tf" data-tf="15" aria-pressed="false">15s</button>
+                  <button class="tf" data-tf="60" aria-pressed="false">1m</button>
+                  <button class="tf" data-tf="300" aria-pressed="false">5m</button>
+                  <button class="tf" data-tf="900" aria-pressed="false">15m</button>
+                  <button class="tf" data-tf="3600" aria-pressed="false">1h</button>
+                  <button class="tf" data-tf="14400" aria-pressed="false">4h</button>
+                  <button class="tf" data-tf="86400" aria-pressed="false">D</button>
                 </div>
-                <div class="seg" role="group" aria-label="Show price or market cap">
-                  <button class="scale" data-scale="mcap" aria-pressed="true">MCap</button>
-                  <button class="scale" data-scale="price" aria-pressed="false">Price</button>
+                <span class="bar-sep" aria-hidden="true"></span>
+                <div class="scale-toggle" role="group" aria-label="Show price or market cap">
+                  <button class="scale" data-scale="price" aria-pressed="false">Price</button><span class="muted">/</span><button class="scale" data-scale="mcap" aria-pressed="true">MCap</button>
                 </div>
-                <span class="chart-hint" id="chartHint">updates every second · drag · zoom · tap to trade</span>
-                <button class="btn-ghost small" id="resetView">⟲ Latest</button>
+                <span class="chart-hint" id="chartHint"><span class="live-pip" aria-hidden="true"></span>Live on-chain trades</span>
+                <button class="icon-btn" id="resetView" title="Jump to latest">⟲</button>
               </div>
               <div class="chart-wrap" id="chartWrap"></div>
             </div>
 
-            <div class="stats-card card" id="statStrip"></div>
-
             <div class="tape card">
-              <div class="card-tabs" role="tablist" aria-label="Trades">
-                <button class="ctab" data-tape="live" aria-selected="true">Live trades <span class="pulse-dot" aria-hidden="true"></span></button>
+              <div class="card-tabs" role="tablist" aria-label="Coin activity">
+                <button class="ctab" data-tape="live" aria-selected="true">Trades <span class="pulse-dot" aria-hidden="true"></span></button>
+                <button class="ctab" data-tape="holders" aria-selected="false">Holders <span class="ctab-n" id="holdersTabN"></span></button>
+                <button class="ctab" data-tape="traders" aria-selected="false">Top traders</button>
                 <button class="ctab" data-tape="mine" aria-selected="false">My trades</button>
               </div>
-              <div class="tape-head" id="tapeHead"><span>Type</span><span>Wallet</span><span class="r">Size</span><span class="r">When</span></div>
-              <div class="tape-rows" id="tapeRows"></div>
-              <div class="tape-rows" id="myTradesRows" hidden></div>
+              <div class="tape-pane" data-pane="live">
+                <div class="tape-head"><span>Type</span><span>Trader</span><span class="r">Amount</span><span class="r">Value</span><span class="r">Age</span></div>
+                <div class="tape-rows" id="tapeRows"></div>
+              </div>
+              <div class="tape-pane" data-pane="holders" hidden><div id="holdersPane"></div></div>
+              <div class="tape-pane" data-pane="traders" hidden><div id="tradersPane"></div></div>
+              <div class="tape-pane" data-pane="mine" hidden><div class="tape-rows" id="myTradesRows"></div></div>
             </div>
           </div>
 
@@ -137,6 +146,10 @@
             </div>
 
             <button class="my-pos-strip card" id="myPosStrip" hidden></button>
+
+            <section class="card side-sec" id="holdersCard" aria-label="Holders"></section>
+            <section class="card side-sec" id="statsCard" aria-label="Stats"></section>
+            <section class="card side-sec" id="poolCard" aria-label="Pool information"></section>
 
             <aside class="positions-tab" id="posTab" aria-label="Your positions">
               <button class="pos-handle" id="posHandle" aria-expanded="false"><span>Positions</span><b id="posCount">0</b></button>
