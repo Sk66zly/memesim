@@ -476,10 +476,15 @@ function publicToken(t) {
     buys5m: t.buys5m ?? null, sells5m: t.sells5m ?? null, createdAt: t.createdAt ?? null, updatedAt: t.updatedAt,
   };
 }
+// Last ~30 minutes of 1-minute closes, for the small trend lines on coin cards.
+function sparkFor(address) {
+  const c = state.candles.get(address) || [];
+  return c.slice(-30).map((x) => +x.close.toPrecision(5));
+}
 function snapshot() {
   return {
     mode: state.mode, sol: state.solPrice,
-    tokens: state.trending.map((a) => publicToken(state.tokens.get(a))).filter(Boolean),
+    tokens: state.trending.map((a) => { const t = publicToken(state.tokens.get(a)); return t && { ...t, spark: sparkFor(a) }; }).filter(Boolean),
   };
 }
 function priceOf(address) {
@@ -500,6 +505,7 @@ function relayPlan() {
   const justRelayed = now - (state.lastRelayAt || 0) < 2_500;
   return {
     want: !serverOk && !justRelayed,
+    serverBlocked: !serverOk,   // viewers should also send their 1-second price for the coin they have open
     addresses: trackedAddresses(),
     needLists: !serverOk && now - (state.lastListsAt || 0) > 60_000,
   };
@@ -561,7 +567,8 @@ function ingestRelay(body) {
     }
   }
   ingestPairs(best);
-  state.lastRelayAt = now;
+  // A one-coin report (someone's live chart) doesn't cover the whole list, so it doesn't count as a full refresh.
+  if (best.size > 2 || body?.lists?.length) state.lastRelayAt = now;
   if (state.mode !== 'live' && state.solPrice && state.trending.length && !state.trending[0].startsWith('DEMO')) switchToLive('price data from players\' browsers');
   return { ok: true, accepted: best.size };
 }
