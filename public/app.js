@@ -142,6 +142,8 @@ function connectStream() {
     setMode(d.mode);
     if (d.sol) S.sol = d.sol;
     S.trending = d.tokens.map((t) => t.address);
+    S.source = d.source || null;
+    $('#listTitle').textContent = S.source === 'pump.fun' ? 'Trending on pump.fun' : 'Trending on Solana';
     for (const t of d.tokens) S.tokens.set(t.address, { ...S.tokens.get(t.address), ...t });
     renderCoinList();
     renderTicker();
@@ -418,8 +420,12 @@ async function selectToken(addr) {
   $('#coinView').hidden = false;
 
   if (!S.tokens.get(addr)?.priceUsd) {
-    try { const d = await api(`/api/token/${addr}`); S.tokens.set(addr, { ...S.tokens.get(addr), ...d.token }); }
-    catch (e) { toast(esc(e.message), 'err'); location.hash = 'trending'; return; }
+    let tok = null;
+    try { tok = (await api(`/api/token/${addr}`)).token; } catch { /* the server couldn't reach it; try from this browser */ }
+    if (!tok?.priceUsd) tok = await browserLookup(addr).catch(() => null) || tok;
+    if (addr !== S.selected) return;
+    if (!tok?.priceUsd) { toast("Couldn't find a live price for that address. Check it's a Solana token address (CA) and try again.", 'err', 6000); location.hash = 'trending'; return; }
+    S.tokens.set(addr, { ...S.tokens.get(addr), ...tok });
   }
   if (!chart) {
     chart = new CandleChart($('#chartWrap'), { formatPrice: (v) => chartFmt(v), onActivate: activateTrade });
@@ -555,7 +561,7 @@ function onSelectedTick(t, dir) {
   renderTermHead();
   applyChartScale();
   if (!chart || !t.priceUsd) return;
-  chart.pushPoint(Date.now(), t.priceUsd);
+  if (!(Date.now() - (S.tradeFeedAt || 0) < 12_000)) chart.pushPoint(Date.now(), t.priceUsd);
   if (S.tf !== 'live') {
     const step = S.tf * 60;
     const bucket = Math.floor(Date.now() / 1000 / step) * step;
@@ -590,43 +596,116 @@ $('#resetView').addEventListener('click', () => chart?.resetView());
 // Reads the coin's live pair straight from DexScreener every second (from this browser), moves the chart,
 // and, while the server is being rate-limited, hands the price to the server so trades use it too.
 let feedBusy = false;
+let lastOpenRelay = 0;
 async function feedTick() {
   const addr = S.selected;
   if (feedBusy || document.hidden || !S.onCoin || !addr || String(addr).startsWith('DEMO')) return;
   feedBusy = true;
   try {
-    const t = S.tokens.get(addr);
-    let pair = null;
-    if (t?.pairAddress) {
-      const j = await getJ(`${DEX}/latest/dex/pairs/solana/${t.pairAddress}`);
-      pair = j?.pairs?.[0] || j?.pair || null;
-    }
-    if (!pair) {
-      const arr = await getJ(`${DEX}/tokens/v1/solana/${addr}`);
-      pair = (Array.isArray(arr) ? arr : []).filter((p) => p?.baseToken?.address === addr).sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
-    }
+    const pair = await dexPairFor(addr);
     if (!pair || addr !== S.selected) return;
     const price = Number(pair.priceUsd);
     if (!(price > 0)) return;
-    const prev = S.tokens.get(addr) || {};
-    const next = {
-      ...prev, priceUsd: price, change5m: pair.priceChange?.m5 ?? prev.change5m, change1h: pair.priceChange?.h1 ?? prev.change1h,
-      change24h: pair.priceChange?.h24 ?? prev.change24h, volume24h: pair.volume?.h24 ?? prev.volume24h, liquidity: pair.liquidity?.usd ?? prev.liquidity,
-      marketCap: pair.marketCap || pair.fdv || prev.marketCap, buys5m: pair.txns?.m5?.buys ?? prev.buys5m, sells5m: pair.txns?.m5?.sells ?? prev.sells5m,
-      pairAddress: prev.pairAddress || pair.pairAddress,
-    };
-    const dir = prev.priceUsd ? Math.sign(price - prev.priceUsd) : 0;
-    S.tokens.set(addr, next);
-    onSelectedTick(next, dir);
-    updateCoinRow(addr, dir);
-    if (S.user) {
-      const p = S.user.positions.find((x) => x.address === addr);
-      if (p) { p.price = price; p.value = p.qty * price; p.pnlUsd = p.value - p.costUsd; p.pnlPct = p.costUsd > 0 ? (p.value / p.costUsd - 1) * 100 : 0; recomputeAccount(); renderAcct(); renderPositions(); updateEstimate(); }
-    }
-    if (S.serverBlocked) api('/api/relay', { pairs: [slimPair(pair)] }).catch(() => {});
+    applyLivePair(addr, pair);
+    // Keep the server's price for this coin fresh, so your trades fill at the price you're looking at.
+    if (S.serverBlocked || Date.now() - lastOpenRelay > 3000) { lastOpenRelay = Date.now(); api('/api/relay', { pairs: [slimPair(pair)] }).catch(() => {}); }
   } catch { /* busy; next second */ } finally { feedBusy = false; }
 }
 setInterval(feedTick, 1000);
+
+// ---- home page: every trending coin's price, refreshed every second from this browser ----
+let homeBusy = false;
+async function homeTick() {
+  if (homeBusy || document.hidden || S.view !== 'trending' || S.onCoin) return;
+  const addrs = S.trending.filter((a) => !String(a).startsWith('DEMO')).slice(0, 30);
+  if (!addrs.length) return;
+  homeBusy = true;
+  try {
+    const arr = await getJ(`${DEX}/tokens/v1/solana/${addrs.join(',')}`);
+    const best = new Map();
+    for (const p of Array.isArray(arr) ? arr : []) {
+      const a = p?.baseToken?.address;
+      if (!addrs.includes(a) || !(Number(p.priceUsd) > 0)) continue;
+      if (!best.has(a) || (p.liquidity?.usd || 0) > (best.get(a).liquidity?.usd || 0)) best.set(a, p);
+    }
+    for (const [a, p] of best) {
+      const prev = S.tokens.get(a);
+      if (prev?.priceUsd === Number(p.priceUsd) && prev?.change5m === p.priceChange?.m5) continue;
+      applyLivePair(a, p);
+    }
+    // other sort orders (top 24h, movers, volume) re-rank live
+    const order = sortedTrending().map((t) => t.address).join(',');
+    const shown = [...document.querySelectorAll('#coinRows .coin-card')].map((el) => el.dataset.addr).join(',');
+    if (!S.query && shown && order !== shown) renderCoinList(); else renderFeatured();
+  } catch { /* busy; next second */ } finally { homeBusy = false; }
+}
+setInterval(homeTick, 1000);
+
+// The coin's best DexScreener pair (null if DexScreener doesn't list it yet, e.g. a brand-new pump.fun coin).
+async function dexPairFor(addr) {
+  const t = S.tokens.get(addr);
+  if (t?.pairAddress && !t.geckoOnly) {
+    const j = await getJ(`${DEX}/latest/dex/pairs/solana/${t.pairAddress}`).catch(() => null);
+    const p = j?.pairs?.[0] || j?.pair;
+    if (p?.baseToken?.address === addr) return p;
+  }
+  const arr = await getJ(`${DEX}/tokens/v1/solana/${addr}`).catch(() => null);
+  return (Array.isArray(arr) ? arr : []).filter((p) => p?.baseToken?.address === addr && p.chainId === 'solana')
+    .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
+}
+
+// Fold a live price update into the page: header, chart, coin card and your position.
+function applyLivePair(addr, pair) {
+  const price = Number(pair.priceUsd);
+  const prev = S.tokens.get(addr) || {};
+  const next = {
+    ...prev, priceUsd: price, change5m: pair.priceChange?.m5 ?? prev.change5m, change1h: pair.priceChange?.h1 ?? prev.change1h,
+    change24h: pair.priceChange?.h24 ?? prev.change24h, volume24h: pair.volume?.h24 ?? prev.volume24h, liquidity: pair.liquidity?.usd ?? prev.liquidity,
+    marketCap: pair.marketCap || pair.fdv || prev.marketCap, buys5m: pair.txns?.m5?.buys ?? prev.buys5m, sells5m: pair.txns?.m5?.sells ?? prev.sells5m,
+    pairAddress: prev.pairAddress || pair.pairAddress, updatedAt: Date.now(),
+  };
+  if (prev.priceUsd && prev.marketCap && !pair.marketCap && !pair.fdv) next.marketCap = prev.marketCap * price / prev.priceUsd;
+  const dir = prev.priceUsd ? Math.sign(price - prev.priceUsd) : 0;
+  S.tokens.set(addr, next);
+  if (addr === S.selected) onSelectedTick(next, dir);
+  updateCoinRow(addr, dir);
+  repricePosition(addr, price);
+}
+function repricePosition(addr, price) {
+  const p = S.user?.positions.find((x) => x.address === addr);
+  if (!p) return;
+  p.price = price; p.value = p.qty * price; p.pnlUsd = p.value - p.costUsd; p.pnlPct = p.costUsd > 0 ? (p.value / p.costUsd - 1) * 100 : 0;
+  recomputeAccount(); renderAcct(); renderPositions(); updateEstimate();
+}
+
+// Look a coin up from this browser (DexScreener, then GeckoTerminal for coins DexScreener hasn't listed yet)
+// and hand it to the server, so any Solana / pump.fun token address can be opened and traded.
+async function browserLookup(addr) {
+  let pair = await dexPairFor(addr);
+  if (!pair) {
+    const j = await getJ(`${GT}/networks/solana/tokens/${addr}?include=top_pools`).catch(() => null);
+    const a = j?.data?.attributes;
+    const price = Number(a?.price_usd);
+    if (!a || !(price > 0)) return null;
+    const pool = (j.data.relationships?.top_pools?.data?.[0]?.id || '').replace(/^solana_/, '') || undefined;
+    pair = {
+      chainId: 'solana', dexId: addr.endsWith('pump') ? 'pumpfun' : 'unknown', pairAddress: pool,
+      baseToken: { address: addr, name: a.name, symbol: a.symbol }, priceUsd: String(price),
+      marketCap: Number(a.market_cap_usd) || Number(a.fdv_usd) || undefined, fdv: Number(a.fdv_usd) || undefined,
+      volume: { h24: Number(a.volume_usd?.h24) || undefined }, info: { imageUrl: /^https:/.test(a.image_url || '') ? a.image_url : undefined },
+      geckoOnly: true,
+    };
+  }
+  await api('/api/relay', { pairs: [slimPair(pair)] }).catch(() => {});
+  return {
+    address: addr, symbol: pair.baseToken.symbol, name: pair.baseToken.name, image: pair.info?.imageUrl || null,
+    pairAddress: pair.pairAddress || null, priceUsd: Number(pair.priceUsd), marketCap: pair.marketCap || pair.fdv || null,
+    change5m: pair.priceChange?.m5 ?? null, change1h: pair.priceChange?.h1 ?? null, change24h: pair.priceChange?.h24 ?? null,
+    volume24h: pair.volume?.h24 ?? null, liquidity: pair.liquidity?.usd ?? null, dexId: pair.dexId,
+    isPump: addr.endsWith('pump') || /pump/.test(String(pair.dexId)), createdAt: pair.pairCreatedAt || null,
+    geckoOnly: !!pair.geckoOnly, updatedAt: Date.now(),
+  };
+}
 
 function updateWatchBtn() {
   const b = $('#watchBtn');
@@ -778,9 +857,42 @@ document.addEventListener('keydown', (e) => {
 
 function updateBalances() {
   const el = $('#tbBal');
+  renderHolding();
   if (!S.user) { el.innerHTML = `<span>Log in to trade</span><span></span>`; return; }
+  el.innerHTML = `<span>Cash ${fmtUsd(S.user.usd)}</span><span>${fmtSol(S.user.sol)}</span>`;
+}
+
+// "What I hold and how I'm doing" on this coin, at the top of the buy/sell box. Updates with every price tick.
+function renderHolding() {
+  const box = $('#tbHold');
+  if (!box) return;
+  const t = S.tokens.get(S.selected);
+  if (!S.user || !t) { box.hidden = true; return; }
   const pos = currentPosition();
-  el.innerHTML = `<span>Cash ${fmtUsd(S.user.usd)} · ${fmtSol(S.user.sol)}</span><span>${pos ? `Hold ${fmtQty(pos.qty)}` : ''}</span>`;
+  const sym = esc(t.symbol || '');
+  box.hidden = false;
+  if (!pos) {
+    box.className = 'tb-hold none';
+    box.innerHTML = `<div class="th-row"><span class="th-k">You hold</span><span class="th-v">0 $${sym}</span></div>
+      <div class="th-sub muted">Buy some to start tracking your profit here.</div>`;
+    delete box.dataset.pnl;
+    return;
+  }
+  const c = cls(pos.pnlUsd);
+  const prev = Number(box.dataset.pnl);
+  box.className = `tb-hold ${c}`;
+  box.innerHTML = `<div class="th-row"><span class="th-k">You hold</span><span class="th-v">${fmtQty(pos.qty)} $${sym}</span></div>
+    <div class="th-grid">
+      <span class="k">Worth now</span><span class="v">${fmtUsd(pos.value)}</span>
+      <span class="k">You paid</span><span class="v">${fmtUsd(pos.costUsd)}</span>
+      <span class="k">Avg entry</span><span class="v">${fmtPrice(pos.avgEntry)}</span>
+    </div>
+    <div class="th-pnl ${c}"><span>${pos.pnlUsd >= 0 ? 'Profit' : 'Loss'}</span><b>${fmtUsd(pos.pnlUsd, { sign: true })}</b><b>${fmtPct(pos.pnlPct, 1)}</b></div>`;
+  if (Number.isFinite(prev) && Math.abs(pos.pnlUsd - prev) > 1e-6) {
+    const pnl = box.querySelector('.th-pnl');
+    pnl.classList.add(pos.pnlUsd > prev ? 'tick-up' : 'tick-down');
+  }
+  box.dataset.pnl = pos.pnlUsd;
 }
 
 function updateEstimate() {
@@ -1013,26 +1125,46 @@ async function browserHistory(addr, tf) {
     .sort((a, b) => a.time - b.time);
 }
 
-// Live on-chain trades for the open coin, if the server's feed is quiet.
+// Live on-chain trades for the open coin, straight from GeckoTerminal every ~2.5s.
+// Every trade moves the live chart at its real price and time, and fills the trades list.
 let tapeBusy = false;
+let tapePauseUntil = 0;
+const tradeKey = { addr: null, newest: 0 };
 setInterval(async () => {
   const addr = S.selected;
   const t = S.tokens.get(addr);
-  if (tapeBusy || document.hidden || !t?.pairAddress || String(addr).startsWith('DEMO') || Date.now() - S.lastTapeAt < 15_000) return;
+  if (tapeBusy || document.hidden || !S.onCoin || !t?.pairAddress || String(addr).startsWith('DEMO') || Date.now() < tapePauseUntil) return;
   tapeBusy = true;
   try {
     const j = await getJ(`${GT}/networks/solana/pools/${t.pairAddress}/trades`);
     if (addr !== S.selected) return;
+    if (tradeKey.addr !== addr) { tradeKey.addr = addr; tradeKey.newest = 0; }
     const trades = (j.data || []).map((row) => {
       const a = row.attributes || {};
       const w = a.tx_from_address || '';
-      return { id: a.tx_hash || row.id, side: a.kind === 'sell' ? 'sell' : 'buy', usd: Number(a.volume_in_usd) || 0,
+      const sell = a.kind === 'sell';
+      return { id: a.tx_hash || row.id, side: sell ? 'sell' : 'buy', usd: Number(a.volume_in_usd) || 0,
+        price: Number(sell ? a.price_from_in_usd : a.price_to_in_usd) || 0,
         wallet: w ? `${w.slice(0, 4)}…${w.slice(-4)}` : '', ts: a.block_timestamp ? Date.parse(a.block_timestamp) : Date.now() };
-    }).sort((x, y) => x.ts - y.ts).slice(-40);
+    }).filter((x) => x.price > 0).sort((x, y) => x.ts - y.ts).slice(-60);
+    if (!trades.length) return;
+    // first load: draw the recent trades; afterwards only the new ones
+    const fresh = trades.filter((x) => x.ts > tradeKey.newest);
+    tradeKey.newest = Math.max(tradeKey.newest, trades[trades.length - 1].ts);
+    S.tradeFeedAt = Date.now();
+    if (chart) for (const x of fresh) chart.pushPoint(x.ts, x.price);
     addTape(trades, S.lastTapeAt > 0);
-    S.lastTapeAt = Date.now() - 5_000; // poll again in ~10s unless the server feed delivers
-  } catch { /* GeckoTerminal busy; try again later */ } finally { tapeBusy = false; }
-}, 5000);
+    // Coins DexScreener doesn't list yet: the newest trade is the live price.
+    if (t.geckoOnly && fresh.length) {
+      const last = fresh[fresh.length - 1];
+      applyLivePair(addr, { priceUsd: last.price, pairAddress: t.pairAddress });
+      if (Date.now() - lastOpenRelay > 3000) {
+        lastOpenRelay = Date.now();
+        api('/api/relay', { pairs: [{ chainId: 'solana', dexId: t.dexId || 'pumpfun', pairAddress: t.pairAddress, baseToken: { address: addr, name: t.name, symbol: t.symbol }, priceUsd: String(last.price), marketCap: S.tokens.get(addr)?.marketCap, info: { imageUrl: t.image || undefined } }] }).catch(() => {});
+      }
+    }
+  } catch (e) { if (String(e.message) === '429') tapePauseUntil = Date.now() + 20_000; } finally { tapeBusy = false; }
+}, 2500);
 
 // ================= ticker =================
 function renderTicker(fresh) {
@@ -1440,12 +1572,13 @@ $('#pePhotoInput').addEventListener('change', async () => {
   if (!/^image\//.test(file.type)) { $('#peErr').textContent = 'Pick an image file (JPG, PNG or WebP).'; return; }
   if (file.size > 15e6) { $('#peErr').textContent = 'That image is over 15 MB. Pick a smaller one.'; return; }
   try { pePhoto = await squarePhoto(file, 192); renderProfileEditor(); }
-  catch { $('#peErr').textContent = "Couldn't read that image. Try a different one."; }
+  catch { $('#peErr').textContent = /heic|heif/i.test(file.type + file.name) ? "iPhone HEIC photos can't be read here. Take a screenshot of it, or save it as JPG, and upload that." : "Couldn't read that image. Try a different one."; }
 });
 // Crop to the centre square and shrink to size×size, so uploads stay tiny.
 async function squarePhoto(file, size) {
-  const url = URL.createObjectURL(file);
-  try {
+  // Read the file as a data: URL (blob: URLs can be blocked by the page's security rules).
+  const url = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(file); });
+  {
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
     const side = Math.min(img.naturalWidth, img.naturalHeight);
     const cv = document.createElement('canvas');
@@ -1456,7 +1589,7 @@ async function squarePhoto(file, size) {
     let out = cv.toDataURL('image/webp', 0.86);
     if (!out.startsWith('data:image/webp')) out = cv.toDataURL('image/jpeg', 0.86);
     return out;
-  } finally { URL.revokeObjectURL(url); }
+  }
 }
 $('#peColors').addEventListener('click', (e) => { const b = e.target.closest('[data-col]'); if (b) { peColor = b.dataset.col; renderProfileEditor(); } });
 $('#peBio').addEventListener('input', renderProfileEditor);
