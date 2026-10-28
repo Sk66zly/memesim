@@ -78,6 +78,24 @@ CREATE TABLE IF NOT EXISTS snapshots (
   PRIMARY KEY (user_id, ts)
 );
 
+CREATE TABLE IF NOT EXISTS watchlist (
+  user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token     TEXT NOT NULL,
+  added_at  INTEGER NOT NULL,
+  PRIMARY KEY (user_id, token)
+);
+
+-- Every time mock money is added (starting balance is not listed here).
+CREATE TABLE IF NOT EXISTS deposits (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  currency   TEXT NOT NULL,             -- 'USD' | 'SOL'
+  amount     REAL NOT NULL,
+  usd_value  REAL NOT NULL,
+  ts         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS deposits_user_ts ON deposits(user_id, ts);
+
 CREATE TABLE IF NOT EXISTS badges (
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   badge      TEXT NOT NULL,
@@ -88,6 +106,17 @@ CREATE TABLE IF NOT EXISTS badges (
 `;
 db.exec(SCHEMA);
 
+// Columns added after the first release. Older databases get them added in place (data is kept).
+const ADDED_COLUMNS = [
+  ['users', 'avatar', 'TEXT'],
+  ['users', 'color', 'TEXT'],
+  ['users', 'bio', 'TEXT'],
+];
+for (const [table, column, type] of ADDED_COLUMNS) {
+  const has = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
 // Primary key of every table; cloud.js uses these to copy rows to Turso.
 const TABLES = {
   users: ['id'],
@@ -97,6 +126,8 @@ const TABLES = {
   trades: ['id'],
   snapshots: ['user_id', 'ts'],
   badges: ['user_id', 'badge'],
+  watchlist: ['user_id', 'token'],
+  deposits: ['id'],
 };
 
 // Small helper so multi-step writes either fully happen or not at all.
@@ -112,4 +143,4 @@ function tx(fn) {
   }
 }
 
-module.exports = { db, tx, DATA_DIR, SCHEMA, TABLES };
+module.exports = { db, tx, DATA_DIR, SCHEMA, TABLES, ADDED_COLUMNS };
