@@ -64,12 +64,14 @@
         <div class="coin-layout" id="tradeLayout">
             <aside class="positions-tab" id="posTab" aria-label="Your positions">
               <button class="pos-handle" id="posHandle" aria-expanded="false"><span>Positions</span><b id="posCount">0</b></button>
+              <button class="pos-rail" id="posRail" type="button" title="Show positions" aria-label="Show positions"><span class="pr-arrow" aria-hidden="true">»</span><b id="posRailN">0</b><span class="pr-lbl">Positions</span></button>
               <div class="pos-inner card">
                 <div class="card-head pos-head">
                   <span class="card-title">Positions <span class="pos-n" id="posN"></span></span>
                   <div class="mini-seg" id="posSort" role="group" aria-label="Sort positions">
                     <button data-psort="value" aria-pressed="true">Value</button><button data-psort="pnl" aria-pressed="false">PnL</button><button data-psort="recent" aria-pressed="false">Recent</button>
                   </div>
+                  <button class="icon-btn pos-collapse" id="posCollapse" type="button" title="Collapse (gives the chart more room)" aria-label="Collapse positions">«</button>
                   <button class="btn-ghost small pos-close" id="posClose" aria-label="Close positions">✕</button>
                 </div>
                 <div class="pos-total" id="posTotal"></div>
