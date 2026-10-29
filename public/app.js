@@ -1657,9 +1657,21 @@ async function loadLeaderboard() {
         <span class="r hide-sm ${cls(r.profitPct)}" role="cell">${fmtPct(r.profitPct, 1)}</span>
         <span class="r hide-sm muted" role="cell">${fmtUsd(r.value, { compact: true })}</span>
       </div>`;
-    rows.innerHTML = d.top.length ? d.top.map(row).join('') : `<div class="lb-empty">No players yet — be the first.</div>`;
+    rows.innerHTML = d.top.length ? d.top.map((r) => row(r)).join('') : `<div class="lb-empty">No players yet — be the first.</div>`;
     $('#lbMe').innerHTML = d.me ? row(d.me, `  · rank ${d.me.rank} of ${d.total}`) : (S.user ? '' : `<div class="lb-row me"><span></span><span class="lb-name">Make an account to get ranked</span><span class="r"><button class="btn-ghost small" data-auth="signup">Join</button></span></div>`);
+    watchMyLbRow();
   } catch (e) { toast(esc(e.message), 'err'); }
+}
+// Your pinned row at the bottom only shows while your row in the list is out of view (no duplicate).
+let lbObs = null;
+function watchMyLbRow() {
+  lbObs?.disconnect();
+  const pin = $('#lbMe');
+  const mine = $('#lbRows .lb-row.me');
+  pin.hidden = false;
+  if (!mine || !('IntersectionObserver' in window)) { if (mine) pin.hidden = true; return; }
+  lbObs = new IntersectionObserver(([e]) => { pin.hidden = e.isIntersecting; });
+  lbObs.observe(mine);
 }
 $$('.range-chips .chip').forEach((b) => b.addEventListener('click', () => {
   S.lbRange = b.dataset.range;
@@ -1746,6 +1758,7 @@ async function renderProfile() {
         <div class="sec-title"><h3>Daily PnL</h3>
           <div class="cal-nav"><button class="btn-ghost small" id="calPrev" aria-label="Previous month">‹</button><span class="m" id="calMonth"></span><button class="btn-ghost small" id="calNext" aria-label="Next month">›</button></div>
         </div>
+        <div class="cal-sum" id="calSum"></div>
         <div class="cal-grid" id="calGrid"></div>
         <div class="cal-foot" id="calFoot"></div>
       </div>
@@ -1865,51 +1878,63 @@ function renderCalendar(liveOnly) {
   const m = S.calMonth;
   $('#calMonth').textContent = m.toLocaleDateString([], { month: 'long', year: 'numeric' }).toUpperCase();
   const pnl = dailyPnl();
-  const today = new Date();
-  const created = new Date(S.user.createdAt); created.setHours(0, 0, 0, 0);
   const days = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
-  if (liveOnly && grid.dataset.m === String(m.getTime())) {
-    const k = dayKey(today);
-    const cell = grid.querySelector(`[data-k="${k}"]`);
-    if (cell) paintDay(cell, pnl.get(k));
-    renderCalFoot(pnl, m, days);
-    return;
+  if (!(liveOnly && grid.dataset.m === String(m.getTime()))) {
+    grid.dataset.m = m.getTime();
+    const today = new Date();
+    const created = new Date(S.user.createdAt); created.setHours(0, 0, 0, 0);
+    let html = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'WEEK'].map((d) => `<div class="cal-dow ${d === 'WEEK' ? 'wk' : ''}">${d}</div>`).join('');
+    const lead = m.getDay();
+    const cells = Math.ceil((lead + days) / 7) * 7;
+    let wkDays = [];
+    for (let i = 0; i < cells; i++) {
+      const d = i - lead + 1;
+      if (d < 1 || d > days) html += `<div class="cal-day empty"></div>`;
+      else {
+        const date = new Date(m.getFullYear(), m.getMonth(), d);
+        const k = dayKey(date);
+        const future = date > today;
+        html += `<div class="cal-day ${future ? 'future' : ''} ${dayKey(today) === k ? 'today' : ''}" data-k="${k}" ${date < created || future ? 'data-none="1"' : ''}><span class="d">${d}</span><span class="a"></span></div>`;
+        wkDays.push(k);
+      }
+      if (i % 7 === 6) { html += `<div class="cal-week" data-days="${wkDays.join(',')}"><span class="d"></span><span class="a"></span></div>`; wkDays = []; }
+    }
+    grid.innerHTML = html;
   }
-  grid.dataset.m = m.getTime();
-  let html = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'].map((d) => `<div class="cal-dow">${d}</div>`).join('');
-  for (let i = 0; i < m.getDay(); i++) html += `<div class="cal-day empty"></div>`;
-  for (let d = 1; d <= days; d++) {
-    const date = new Date(m.getFullYear(), m.getMonth(), d);
-    const k = dayKey(date);
-    const future = date > today;
-    const before = date < created;
-    html += `<div class="cal-day ${future ? 'future' : ''} ${dayKey(today) === k ? 'today' : ''}" data-k="${k}" ${before || future ? 'data-none="1"' : ''}><span class="d">${d}</span><span class="a"></span></div>`;
-  }
-  grid.innerHTML = html;
   for (const cell of grid.querySelectorAll('.cal-day[data-k]')) paintDay(cell, cell.dataset.none ? null : pnl.get(cell.dataset.k));
+  for (const w of grid.querySelectorAll('.cal-week')) {
+    const vals = w.dataset.days.split(',').map((k) => pnl.get(k)).filter((v) => v != null);
+    paintDay(w, vals.length ? vals.reduce((a, b) => a + b, 0) : null, 'that week');
+  }
   renderCalFoot(pnl, m, days);
 }
-function paintDay(cell, v) {
+function paintDay(cell, v, when = 'that day') {
   cell.classList.remove('pos', 'neg', 'flat');
   const a = cell.querySelector('.a');
-  if (v == null) { a.textContent = ''; return; }
+  if (v == null) { a.textContent = ''; cell.title = ''; return; }
   if (Math.abs(v) < 0.005) { cell.classList.add('flat'); a.textContent = '$0'; cell.title = 'No change'; return; }
   cell.classList.add(v > 0 ? 'pos' : 'neg');
   const s = Math.abs(v) >= 1000 ? fmtUsd(v, { sign: true, compact: true }) : `${v > 0 ? '+' : '−'}$${Math.abs(v).toFixed(Math.abs(v) >= 100 ? 0 : 2)}`;
   a.textContent = s;
-  cell.title = `${fmtUsd(v, { sign: true })} realized from sells that day`;
+  cell.title = `${fmtUsd(v, { sign: true })} realized from sells ${when}`;
 }
 function renderCalFoot(pnl, m, days) {
-  let total = 0, green = 0, red = 0;
+  let total = 0, green = 0, red = 0, best = null, worst = null, traded = 0;
   for (let d = 1; d <= days; d++) {
     const v = pnl.get(dayKey(new Date(m.getFullYear(), m.getMonth(), d)));
     if (v == null) continue;
-    total += v;
+    total += v; traded++;
     if (v > 0.005) green++; else if (v < -0.005) red++;
+    if (best == null || v > best) best = v;
+    if (worst == null || v < worst) worst = v;
   }
+  const name = m.toLocaleDateString([], { month: 'long' });
+  const stat = (k, v) => `<div><span class="k">${k}</span><b class="${v == null ? '' : cls(v)}">${v == null ? '—' : fmtUsd(v, { sign: true })}</b></div>`;
+  $('#calSum').innerHTML = `<div class="cal-total"><span class="k">${esc(name)} total</span><b class="${cls(total)}">${fmtUsd(total, { sign: true })}</b><span class="muted small">${traded ? `from ${traded} trading day${traded === 1 ? '' : 's'}` : 'No sells yet this month'}</span></div>
+    <div class="cal-stats">${stat('Best day', best)}${stat('Worst day', worst)}${stat('Avg day', traded ? total / traded : null)}</div>`;
   const open = (S.user?.positions || []).reduce((s, p) => s + (p.pnlUsd || 0), 0);
   $('#calFoot').innerHTML = `<span><span class="up">${green} green</span> · <span class="down">${red} red</span> days</span>
-    <span>Month realized <b class="${cls(total)}">${fmtUsd(total, { sign: true })}</b>${S.user?.positions?.length ? ` · open positions <b class="${cls(open)}">${fmtUsd(open, { sign: true })}</b> unrealized` : ''}</span>`;
+    <span>${S.user?.positions?.length ? `Open positions <b class="${cls(open)}">${fmtUsd(open, { sign: true })}</b> unrealized (not in the calendar until you sell)` : 'Days count what you made from selling'}</span>`;
 }
 setInterval(() => { if (S.view === 'profile') renderProfileLive(); }, 2000);
 setInterval(() => { if (S.view === 'profile' && S.user) loadProfileData(); }, 120_000);
