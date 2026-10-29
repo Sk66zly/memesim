@@ -1071,14 +1071,25 @@ function renderPositions() {
     list.innerHTML = `<div class="pos-empty">Log in to start paper trading.<br><button class="btn-ghost" data-auth="signup" style="margin-top:10px">Create account</button></div>`;
     $('#posTotal').innerHTML = '';
     $('#posCount').textContent = '0';
+    $('#posN').textContent = '';
     strip.hidden = true;
     return;
   }
-  const ps = S.user.positions.slice().sort((a, b) => (b.address === S.selected) - (a.address === S.selected) || b.value - a.value);
+  const sort = S.posSort || 'value';
+  const by = { value: (a, b) => b.value - a.value, pnl: (a, b) => b.pnlUsd - a.pnlUsd, recent: (a, b) => (b.openedAt || 0) - (a.openedAt || 0) }[sort];
+  const ps = S.user.positions.slice().sort(by);
   const tv = ps.reduce((s, p) => s + p.value, 0), tp = ps.reduce((s, p) => s + p.pnlUsd, 0), tc = ps.reduce((s, p) => s + p.costUsd, 0);
   $('#posCount').textContent = ps.length;
-  $('#posTotal').innerHTML = `<div class="k">Total value</div><div class="v">${fmtUsd(tv)}</div>
-    <div class="${cls(tp)}" style="font-weight:800">${fmtUsd(tp, { sign: true })} (${fmtPct(tc ? (tp / tc) * 100 : 0)}) unrealized</div>`;
+  $('#posN').textContent = ps.length ? ps.length : '';
+
+  // summary: holdings value, unrealized PnL, allocation bar
+  const COLORS = ['#86efac', '#7dd3fc', '#c4b5fd', '#fcd34d', '#f9a8d4', '#fdba74', '#5eead4', '#a5b4fc'];
+  const alloc = ps.filter((p) => p.value > 0).sort((a, b) => b.value - a.value);
+  $('#posTotal').innerHTML = ps.length ? `<div class="ps-sum">
+      <div><span class="k">Holdings</span><b>${fmtUsd(tv)}</b></div>
+      <div class="r"><span class="k">Unrealized PnL</span><b class="${cls(tp)}">${fmtUsd(tp, { sign: true })} <small>${fmtPct(tc ? (tp / tc) * 100 : 0, 2)}</small></b></div>
+    </div>
+    <div class="alloc" title="How your holdings are split">${alloc.map((p, i) => `<span style="width:${(p.value / (tv || 1)) * 100}%;background:${COLORS[i % COLORS.length]}" title="${esc(p.symbol)} ${((p.value / (tv || 1)) * 100).toFixed(1)}%"></span>`).join('')}</div>` : '';
 
   const cur = ps.find((p) => p.address === S.selected);
   handle.classList.toggle('has-up', !!cur && cur.pnlUsd >= 0);
@@ -1090,7 +1101,8 @@ function renderPositions() {
   } else strip.hidden = true;
 
   if (!ps.length) {
-    list.innerHTML = `<div class="pos-empty">No open positions.<br>Open a coin and hit <span class="up">Buy</span>. Your positions show up here live.</div>`;
+    list.innerHTML = `<div class="pos-empty">No open positions yet.<br>Open a coin and hit <span class="up">Buy</span>. Your positions show up here, live.</div>`;
+    list.dataset.keys = '';
     return;
   }
   // keep DOM nodes stable so the flash animations look right
@@ -1098,41 +1110,48 @@ function renderPositions() {
   if (list.dataset.keys !== want) {
     list.dataset.keys = want;
     list.innerHTML = ps.map((p) => `
-      <div class="pos-card" data-addr="${esc(p.address)}" role="button" tabindex="0">
-        <div class="pos-top">${coinImg(p)}<b>${esc(p.symbol)}</b><span class="muted" style="margin-left:auto;font-size:10px" data-f="age"></span></div>
-        <div class="pos-grid">
-          <span class="k">Quantity</span><span class="v" data-f="qty"></span>
-          <span class="k">Avg entry</span><span class="v" data-f="avg"></span>
-          <span class="k">Price now</span><span class="v" data-f="px"></span>
-          <span class="k">Value</span><span class="v" data-f="val"></span>
+      <div class="prow" data-addr="${esc(p.address)}" role="button" tabindex="0" aria-label="Open ${esc(p.symbol)}">
+        <div class="prow-main">
+          ${coinImg(p, 'coin-img prow-img')}
+          <div class="prow-id"><b>${esc(p.symbol)}</b><span class="muted" data-f="sub"></span></div>
+          <div class="prow-val"><b data-f="val"></b><span class="prow-pnl" data-f="pnl"></span></div>
         </div>
-        <div class="pnl-big" data-f="pnl"><span data-f="pnlUsd"></span><span data-f="pnlPct"></span></div>
-        <div class="quick-sell"><button data-qs="50">Sell 50%</button><button data-qs="100">Sell all</button></div>
+        <div class="prow-foot">
+          <span class="muted" data-f="mc"></span>
+          <span class="prow-qs"><button data-qs="25" title="Sell 25%">25%</button><button data-qs="50" title="Sell 50%">50%</button><button data-qs="100" title="Sell all">All</button></span>
+        </div>
       </div>`).join('');
   }
   for (const p of ps) {
-    const card = list.querySelector(`.pos-card[data-addr="${CSS.escape(p.address)}"]`);
-    if (!card) continue;
-    card.classList.toggle('current', p.address === S.selected);
-    card.classList.toggle('win', p.pnlUsd >= 0);
-    card.classList.toggle('loss', p.pnlUsd < 0);
-    card.querySelector('[data-f="age"]').textContent = `held ${ago(p.openedAt)}`;
-    card.querySelector('[data-f="qty"]').textContent = fmtQty(p.qty);
-    card.querySelector('[data-f="avg"]').textContent = fmtPrice(p.avgEntry);
-    card.querySelector('[data-f="px"]').textContent = fmtPrice(p.price);
-    card.querySelector('[data-f="val"]').textContent = fmtUsd(p.value);
-    const pnl = card.querySelector('[data-f="pnl"]');
+    const row = list.querySelector(`.prow[data-addr="${CSS.escape(p.address)}"]`);
+    if (!row) continue;
+    row.classList.toggle('current', p.address === S.selected);
+    row.classList.toggle('win', p.pnlUsd >= 0);
+    row.classList.toggle('loss', p.pnlUsd < 0);
+    row.querySelector('[data-f="sub"]').textContent = `${fmtQty(p.qty)} · ${ago(p.openedAt)}`;
+    row.querySelector('[data-f="val"]').textContent = fmtUsd(p.value);
+    const supply = supplyOf(S.tokens.get(p.address));
+    row.querySelector('[data-f="mc"]').textContent = supply
+      ? `MC ${fmtUsd(p.avgEntry * supply, { compact: true })} → ${fmtUsd(p.price * supply, { compact: true })}`
+      : `Entry ${fmtPrice(p.avgEntry)} → ${fmtPrice(p.price)}`;
+    const pnl = row.querySelector('[data-f="pnl"]');
     const last = S.lastPnl.get(p.address);
-    pnl.className = `pnl-big ${p.pnlUsd >= 0 ? 'up' : 'down'}`;
+    pnl.className = `prow-pnl ${p.pnlUsd >= 0 ? 'up' : 'down'}`;
     if (last != null && Math.abs(p.pnlUsd - last) > 1e-9) { void pnl.offsetWidth; pnl.classList.add(p.pnlUsd > last ? 'tick-up' : 'tick-down'); }
     S.lastPnl.set(p.address, p.pnlUsd);
-    pnl.querySelector('[data-f="pnlUsd"]').textContent = fmtUsd(p.pnlUsd, { sign: true });
-    pnl.querySelector('[data-f="pnlPct"]').textContent = fmtPct(p.pnlPct);
+    pnl.textContent = `${fmtUsd(p.pnlUsd, { sign: true })} (${fmtPct(p.pnlPct, 1)})`;
   }
 }
+$('#posSort').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-psort]');
+  if (!b) return;
+  S.posSort = b.dataset.psort;
+  $$('#posSort [data-psort]').forEach((x) => x.setAttribute('aria-pressed', x === b));
+  renderPositions();
+});
 $('#posList').addEventListener('click', async (e) => {
   const qs = e.target.closest('[data-qs]');
-  const card = e.target.closest('.pos-card');
+  const card = e.target.closest('.prow');
   if (!card) return;
   if (qs) {
     e.stopPropagation();
