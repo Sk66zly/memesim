@@ -111,20 +111,6 @@ CREATE TABLE IF NOT EXISTS badges (
   detail     TEXT,
   PRIMARY KEY (user_id, badge)
 );
-
--- Private visitor counter (see visits.js): one row per anonymous browser id per day.
-CREATE TABLE IF NOT EXISTS visits (
-  day       TEXT NOT NULL,
-  vid       TEXT NOT NULL,
-  first_ts  INTEGER NOT NULL,
-  ref       TEXT,
-  user_id   INTEGER,
-  PRIMARY KEY (day, vid)
-);
-CREATE TABLE IF NOT EXISTS owner_vids (
-  vid  TEXT PRIMARY KEY,
-  at   INTEGER NOT NULL
-);
 `;
 db.exec(SCHEMA);
 
@@ -151,8 +137,6 @@ const TABLES = {
   watchlist: ['user_id', 'token'],
   deposits: ['id'],
   avatars: ['user_id'],
-  visits: ['day', 'vid'],
-  owner_vids: ['vid'],
 };
 
 // Small helper so multi-step writes either fully happen or not at all.
