@@ -1050,6 +1050,7 @@ async function executeTrade() {
     const t = r.trade;
     if (t.side === 'buy') toast(`<b>Bought</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="muted">@ ${fmtPrice(t.price)}</span>`);
     else toast(`<b>Sold</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="${cls(t.pnlUsd)}">${fmtUsd(t.pnlUsd, { sign: true })} (${fmtPct(t.pnlPct, 1)})</span>`, t.pnlUsd < 0 ? 'err' : '');
+    noteRealized(t);
     amountInput.value = '';
     S.sellPercent = null;
     closeSheet();
@@ -1141,6 +1142,7 @@ $('#posList').addEventListener('click', async (e) => {
       S.user = r.user;
       const t = r.trade;
       toast(`<b>Sold</b> ${fmtQty(t.qty)} ${esc(t.symbol)} for ${fmtUsd(t.usdValue)}<br><span class="${cls(t.pnlUsd)}">${fmtUsd(t.pnlUsd, { sign: true })} (${fmtPct(t.pnlPct, 1)})</span>`, t.pnlUsd < 0 ? 'err' : '');
+      noteRealized(t);
       renderAcct(); renderPositions(); updateChartLines(); renderCoinList(); updateEstimate();
     } catch (err) { toast(esc(err.message), 'err'); qs.disabled = false; }
     return;
@@ -1683,8 +1685,9 @@ async function renderProfile() {
 }
 async function loadProfileData() {
   try {
-    const [snaps, trades] = await Promise.all([api('/api/me/snapshots?days=400'), api('/api/me/trades?limit=40')]);
+    const [snaps, trades, realized] = await Promise.all([api('/api/me/snapshots?days=400'), api('/api/me/trades?limit=40'), api('/api/me/realized?days=400')]);
     S.snapshots = snaps;
+    S.realized = realized;
     renderCalendar();
     $('#tradesTable').innerHTML = trades.length ? `<thead><tr><th>Time</th><th>Side</th><th>Token</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Value</th><th class="r">PnL</th></tr></thead><tbody>${trades.map((t) => `
       <tr><td class="muted">${new Date(t.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
@@ -1738,22 +1741,20 @@ function renderProfileLive() {
 }
 
 const dayKey = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+// Daily PnL = realized profit/loss: the sum of what each sell made or lost that day (your local time).
+// Coins you still hold don't change past days; they show as "unrealized" under the calendar.
 function dailyPnl() {
-  // close of each local day = last snapshot that day; daily PnL = close − previous close.
-  const closes = new Map();
-  for (const s of S.snapshots) closes.set(dayKey(new Date(s.ts)), s.profit);
-  if (S.user) closes.set(dayKey(new Date()), S.user.profit); // today is live
-  const created = S.user ? new Date(S.user.createdAt) : new Date();
-  const start = new Date(created.getFullYear(), created.getMonth(), created.getDate());
   const out = new Map();
-  let prev = 0;
-  for (let d = new Date(start); d <= new Date(); d.setDate(d.getDate() + 1)) {
-    const k = dayKey(d);
-    const close = closes.has(k) ? closes.get(k) : prev;
-    out.set(k, close - prev);
-    prev = close;
+  for (const r of S.realized || []) {
+    const k = dayKey(new Date(r.ts));
+    out.set(k, (out.get(k) || 0) + r.pnl);
   }
   return out;
+}
+function noteRealized(t) {
+  if (t?.side !== 'sell' || t.pnlUsd == null) return;
+  (S.realized ||= []).push({ ts: Date.now(), pnl: t.pnlUsd });
+  if (S.view === 'profile') renderCalendar();
 }
 function renderCalendar(liveOnly) {
   const grid = $('#calGrid');
@@ -1793,7 +1794,7 @@ function paintDay(cell, v) {
   cell.classList.add(v > 0 ? 'pos' : 'neg');
   const s = Math.abs(v) >= 1000 ? fmtUsd(v, { sign: true, compact: true }) : `${v > 0 ? '+' : '−'}$${Math.abs(v).toFixed(Math.abs(v) >= 100 ? 0 : 2)}`;
   a.textContent = s;
-  cell.title = `${fmtUsd(v, { sign: true })} trading PnL`;
+  cell.title = `${fmtUsd(v, { sign: true })} realized from sells that day`;
 }
 function renderCalFoot(pnl, m, days) {
   let total = 0, green = 0, red = 0;
@@ -1803,7 +1804,9 @@ function renderCalFoot(pnl, m, days) {
     total += v;
     if (v > 0.005) green++; else if (v < -0.005) red++;
   }
-  $('#calFoot').innerHTML = `<span><span class="up">${green} green</span> · <span class="down">${red} red</span> days</span><span>Month PnL <b class="${cls(total)}">${fmtUsd(total, { sign: true })}</b></span>`;
+  const open = (S.user?.positions || []).reduce((s, p) => s + (p.pnlUsd || 0), 0);
+  $('#calFoot').innerHTML = `<span><span class="up">${green} green</span> · <span class="down">${red} red</span> days</span>
+    <span>Month realized <b class="${cls(total)}">${fmtUsd(total, { sign: true })}</b>${S.user?.positions?.length ? ` · open positions <b class="${cls(open)}">${fmtUsd(open, { sign: true })}</b> unrealized` : ''}</span>`;
 }
 setInterval(() => { if (S.view === 'profile') renderProfileLive(); }, 2000);
 setInterval(() => { if (S.view === 'profile' && S.user) loadProfileData(); }, 120_000);
@@ -1859,6 +1862,7 @@ $('#resetConfirm').addEventListener('click', async () => {
     S.user = r.user;
     S.myTokenTrades = [];
     S.snapshots = [];
+    S.realized = [];
     closeModal($('#resetModal'));
     renderAcct(); renderPositions(); renderHomeSide(); updateChartLines(); updateEstimate(); renderMyTrades();
     if (S.view === 'profile') renderProfile();
