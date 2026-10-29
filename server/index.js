@@ -167,6 +167,10 @@ async function api(req, res, url) {
     return send(res, 200, { user: game.account(user.id), mode: market.mode });
   }
   if (p === '/api/me/trades' && m === 'GET') return send(res, 200, game.myTrades(needUser().id, Number(url.searchParams.get('limit')) || 50));
+  if (p === '/api/me/realized' && m === 'GET') {
+    const days = Math.max(1, Math.min(800, Number(url.searchParams.get('days')) || 400));
+    return send(res, 200, game.realizedFor(needUser().id, Date.now() - days * 864e5));
+  }
   if (p === '/api/me/snapshots' && m === 'GET') {
     const days = Math.min(400, Math.max(1, Number(url.searchParams.get('days')) || 120));
     return send(res, 200, game.snapshotsFor(needUser().id, Date.now() - days * 864e5));
