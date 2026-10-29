@@ -1065,7 +1065,7 @@ async function executeTrade() {
 
 // ================= trade sounds =================
 // Original cash-register sounds, made on the fly with the Web Audio API (no audio files to download).
-// Buy = "cha-ching" (drawer + bright bell), sell = "cash-out" (lower bell). Mute button in the header.
+// One cash-register "ka-ching" for buys and sells. Mute button in the header.
 const sfx = {
   ctx: null, out: null,
   on: (() => { try { return localStorage.getItem('memesim.sound') !== '0'; } catch { return true; } })(),
@@ -1081,38 +1081,40 @@ const sfx = {
     if (this.ctx.state === 'suspended') this.ctx.resume();
     return this.ctx;
   },
-  noise(t, dur, gain, freq) { // "cha": short metallic scrape
+  // "ka": a bright metallic click (band-passed noise burst)
+  click(t, dur, gain, lo, hi) {
     const ac = this.ctx, len = Math.ceil(ac.sampleRate * dur);
     const buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (len / 5));
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-5 * i / len);
     const src = ac.createBufferSource(); src.buffer = buf;
-    const f = ac.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = freq;
+    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = lo;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = hi;
     const g = ac.createGain(); g.gain.value = gain;
-    src.connect(f).connect(g).connect(this.out); src.start(t);
+    src.connect(hp).connect(lp).connect(g).connect(this.out); src.start(t);
   },
-  bell(t, f0, dur, gain) { // "ching": metallic partials, higher ones fade faster
-    for (const [m, a] of [[1, 1], [2.76, 0.45], [5.4, 0.25], [8.93, 0.12]]) {
-      const ac = this.ctx, o = ac.createOscillator(), g = ac.createGain();
-      const d = dur / (1 + m * 0.15);
+  // "ching": a bell around 2.1 kHz with an inharmonic upper ring; higher partials fade faster
+  ring(t, f0, dur, gain, partials, decay) {
+    const ac = this.ctx;
+    for (const [m, a] of partials) {
+      const o = ac.createOscillator(), g = ac.createGain();
+      const end = t + dur / (decay * (1 + m * 0.3) / 4.5);
       o.frequency.value = f0 * m;
       g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(gain * a, t + 0.003);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + d);
-      o.connect(g).connect(this.out); o.start(t); o.stop(t + d + 0.05);
+      g.gain.linearRampToValueAtTime(gain * a, t + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, Math.min(t + dur, end));
+      o.connect(g).connect(this.out); o.start(t); o.stop(t + dur + 0.05);
     }
   },
-  play(kind) {
+  // Same "ka-ching" for buys and sells.
+  play() {
     if (!this.on) return;
     try {
       if (!this.ready()) return;
       const t = this.ctx.currentTime + 0.01;
-      if (kind === 'buy') {
-        this.noise(t, 0.03, 0.9, 3500); this.noise(t + 0.055, 0.03, 0.7, 4500);
-        this.bell(t + 0.08, 2093, 0.9, 0.5); this.bell(t + 0.11, 2637, 0.8, 0.35);
-      } else {
-        this.noise(t, 0.03, 0.8, 3000);
-        this.bell(t + 0.05, 1568, 0.9, 0.5); this.bell(t + 0.09, 1175, 0.8, 0.35);
-      }
+      this.click(t, 0.045, 0.9, 4500, 9000);
+      this.click(t + 0.035, 0.035, 0.6, 6000, 9500);
+      this.ring(t + 0.07, 2110, 0.7, 0.55, [[1, 1], [2.28, 0.55], [3.55, 0.18]], 4.5);
+      this.ring(t + 0.075, 2117, 0.6, 0.25, [[1, 1]], 5);
     } catch { /* sound is a nice-to-have */ }
   },
 };
