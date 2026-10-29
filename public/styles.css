@@ -629,6 +629,20 @@ main { max-width: 1440px; margin: 0 auto; padding: 18px max(18px, env(safe-area-
   .positions-tab .pos-inner { max-height: calc(100dvh - var(--header-h) - 32px); }
   .positions-tab .pos-list { max-height: none; flex: 1; min-height: 0; }
 }
+/* collapsible positions column (wide screens only) */
+.pos-rail, .pos-collapse { display: none; }
+@media (min-width: 1500px) {
+  .pos-collapse { display: grid; font-size: 15px; }
+  .coin-layout.pos-collapsed { grid-template-columns: 44px minmax(0, 1fr) 360px; }
+  .pos-collapsed .positions-tab .pos-inner { display: none; }
+  .pos-collapsed .pos-rail { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 44px; padding: 12px 0; border-radius: var(--r); background: var(--surface); border: 1px solid var(--line); color: var(--muted); }
+  .pos-collapsed .pos-rail:hover { color: var(--text); border-color: var(--line-2); }
+  .pr-arrow { font-size: 16px; }
+  .pos-rail b { min-width: 22px; height: 22px; border-radius: 999px; display: grid; place-items: center; font: 700 12px var(--mono); background: var(--surface-3); color: var(--text); }
+  .pos-rail.up b { background: var(--up-soft); color: var(--up); }
+  .pos-rail.down b { background: var(--down-soft); color: var(--down); }
+  .pr-lbl { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 12px; font-weight: 600; letter-spacing: .3px; }
+}
 /* ---------- responsive ---------- */
 @media (max-width: 1100px) {
   .coin-layout { grid-template-columns: minmax(0, 1fr) 320px; }
