@@ -62,6 +62,20 @@
 
       <div id="coinView" hidden>
         <div class="coin-layout" id="tradeLayout">
+            <aside class="positions-tab" id="posTab" aria-label="Your positions">
+              <button class="pos-handle" id="posHandle" aria-expanded="false"><span>Positions</span><b id="posCount">0</b></button>
+              <div class="pos-inner card">
+                <div class="card-head pos-head">
+                  <span class="card-title">Positions <span class="pos-n" id="posN"></span></span>
+                  <div class="mini-seg" id="posSort" role="group" aria-label="Sort positions">
+                    <button data-psort="value" aria-pressed="true">Value</button><button data-psort="pnl" aria-pressed="false">PnL</button><button data-psort="recent" aria-pressed="false">Recent</button>
+                  </div>
+                  <button class="btn-ghost small pos-close" id="posClose" aria-label="Close positions">✕</button>
+                </div>
+                <div class="pos-total" id="posTotal"></div>
+                <div class="pos-list" id="posList"></div>
+              </div>
+            </aside>
           <div class="coin-main">
             <div class="coin-head card">
               <button class="back-btn" id="backBtn" aria-label="Back to trending coins">←</button>
@@ -158,20 +172,6 @@
             <section class="card side-sec" id="statsCard" aria-label="Stats"></section>
             <section class="card side-sec" id="poolCard" aria-label="Pool information"></section>
 
-            <aside class="positions-tab" id="posTab" aria-label="Your positions">
-              <button class="pos-handle" id="posHandle" aria-expanded="false"><span>Positions</span><b id="posCount">0</b></button>
-              <div class="pos-inner card">
-                <div class="card-head pos-head">
-                  <span class="card-title">Positions <span class="pos-n" id="posN"></span></span>
-                  <div class="mini-seg" id="posSort" role="group" aria-label="Sort positions">
-                    <button data-psort="value" aria-pressed="true">Value</button><button data-psort="pnl" aria-pressed="false">PnL</button><button data-psort="recent" aria-pressed="false">Recent</button>
-                  </div>
-                  <button class="btn-ghost small pos-close" id="posClose" aria-label="Close positions">✕</button>
-                </div>
-                <div class="pos-total" id="posTotal"></div>
-                <div class="pos-list" id="posList"></div>
-              </div>
-            </aside>
           </aside>
         </div>
         <div class="mobile-trade-bar" id="mobileTradeBar">
