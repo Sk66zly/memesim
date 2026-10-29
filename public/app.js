@@ -1081,6 +1081,9 @@ function renderPositions() {
   const tv = ps.reduce((s, p) => s + p.value, 0), tp = ps.reduce((s, p) => s + p.pnlUsd, 0), tc = ps.reduce((s, p) => s + p.costUsd, 0);
   $('#posCount').textContent = ps.length;
   $('#posN').textContent = ps.length ? ps.length : '';
+  $('#posRailN').textContent = ps.length;
+  $('#posRail').classList.toggle('up', ps.length > 0 && tp >= 0);
+  $('#posRail').classList.toggle('down', ps.length > 0 && tp < 0);
 
   // summary: holdings value, unrealized PnL, allocation bar
   const COLORS = ['#86efac', '#7dd3fc', '#c4b5fd', '#fcd34d', '#f9a8d4', '#fdba74', '#5eead4', '#a5b4fc'];
@@ -1142,6 +1145,15 @@ function renderPositions() {
     pnl.textContent = `${fmtUsd(p.pnlUsd, { sign: true })} (${fmtPct(p.pnlPct, 1)})`;
   }
 }
+// Collapse the positions column to a thin rail so the chart gets the extra width (remembered per browser).
+function setPosCollapsed(on) {
+  $('#tradeLayout').classList.toggle('pos-collapsed', on);
+  try { localStorage.setItem('memesim.posCollapsed', on ? '1' : '0'); } catch { /* private mode */ }
+  chart?.resize();
+}
+$('#posCollapse').addEventListener('click', () => setPosCollapsed(true));
+$('#posRail').addEventListener('click', () => setPosCollapsed(false));
+try { if (localStorage.getItem('memesim.posCollapsed') === '1') $('#tradeLayout').classList.add('pos-collapsed'); } catch { /* ignore */ }
 $('#posSort').addEventListener('click', (e) => {
   const b = e.target.closest('[data-psort]');
   if (!b) return;
