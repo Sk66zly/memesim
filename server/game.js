@@ -387,6 +387,10 @@ async function trade(userId, body) {
   return result;
 }
 
+// Realized profit/loss of every sell (for the daily PnL calendar).
+function realizedFor(userId, sinceMs) {
+  return db.prepare(`SELECT ts, pnl_usd AS pnl FROM trades WHERE user_id = ? AND side = 'sell' AND pnl_usd IS NOT NULL AND ts >= ? ORDER BY ts LIMIT 20000`).all(userId, sinceMs);
+}
 function myTrades(userId, limit = 50) {
   return db.prepare('SELECT * FROM trades WHERE user_id = ? ORDER BY ts DESC LIMIT ?').all(userId, Math.min(200, limit));
 }
@@ -479,7 +483,7 @@ function resetAccount(userId, body) {
 }
 
 module.exports = {
-  resetAccount,
+  resetAccount, realizedFor,
   CFG, BADGES, AVATARS, COLORS, GameError, photoFile, register, deposit, updateProfile, publicProfile, setWatch, login, userFromSession, destroySession, account, faucet, trade,
   myTrades, recentFeed, leaderboard, snapshotsFor, takeSnapshots, checkTimedBadges, takeNewBadges, badgesFor,
 };
