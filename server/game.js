@@ -155,7 +155,7 @@ function account(userId) {
   const v = accountValue(u);
   if (CFG.startingUsd + v.profit >= CFG.whaleTarget) award(u.id, 'whale', `Traded $1,000 up to $${Math.round(CFG.startingUsd + v.profit).toLocaleString('en-US')}`);
   return {
-    id: u.id, username: u.username, email: u.email, createdAt: u.created_at, isOwner: require('./visits').isOwner(u.id),
+    id: u.id, username: u.username, email: u.email, createdAt: u.created_at,
     avatar: u.avatar || null, color: u.color || null, bio: u.bio || '', photoUrl: photoUrlFor(u.id),
     usd: u.usd, sol: u.sol, solPrice: market.solPrice, netDeposits: u.net_deposits,
     holdings: v.holdings, value: v.value, profit: v.profit,
