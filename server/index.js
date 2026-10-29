@@ -6,7 +6,6 @@ const path = require('node:path');
 const market = require('./market');
 const game = require('./game');
 const cloud = require('./cloud');
-const visits = require('./visits');
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC = path.join(__dirname, '..', 'public');
@@ -163,14 +162,6 @@ async function api(req, res, url) {
 
   if (p === '/api/stream' && m === 'GET') return openStream(req, res, url, user);
 
-  if (p === '/api/visit' && m === 'POST') {
-    if (rateLimit(`visit:${ip(req)}`, 30, 60_000)) visits.record(await readBody(req), user?.id ?? null);
-    return send(res, 200, { ok: true });
-  }
-  if (p === '/api/owner/stats' && m === 'GET') {
-    if (!user || !visits.isOwner(user.id)) throw new game.GameError('Not found.', 404);
-    return send(res, 200, visits.stats());
-  }
   if (p === '/api/me' && m === 'GET') {
     if (!user) return send(res, 200, { user: null, mode: market.mode });
     return send(res, 200, { user: game.account(user.id), mode: market.mode });
