@@ -277,29 +277,11 @@ async function claimFaucet() {
   } catch (e) { toast(esc(e.message), 'err'); }
 }
 
-// Anonymous visit ping for the owner's private visitor counter: a random id kept in this browser, nothing personal.
-let visitSentFor = null;
-function sendVisit() {
-  const who = S.user?.id ?? 'guest';
-  if (visitSentFor === who) return;
-  visitSentFor = who;
-  let vid = null;
-  try { vid = localStorage.getItem('memesim.vid'); } catch { /* storage blocked */ }
-  if (!vid) {
-    vid = (crypto.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`);
-    try { localStorage.setItem('memesim.vid', vid); } catch { /* storage blocked */ }
-  }
-  let ref = '';
-  try { const h = document.referrer && new URL(document.referrer).hostname; if (h && h !== location.hostname) ref = h; } catch { /* no referrer */ }
-  api('/api/visit', { vid, ref }).catch(() => {});
-}
-
 async function refreshMe() {
   const d = await api('/api/me');
   setMode(d.mode);
   const had = S.user;
   S.user = d.user;
-  sendVisit();
   if (S.user && S.user.solPrice) S.sol = S.sol || S.user.solPrice;
   mergeWatchlist();
   renderAcct();
@@ -1772,10 +1754,6 @@ async function renderProfile() {
         </div>
       </div>
       <div class="pf-stats card" id="pfStats"></div>
-      ${u.isOwner ? `<div class="pf-visits card pf-card">
-        <div class="sec-title"><h3>Site visitors</h3><span class="muted small">Only you can see this · your own visits aren't counted</span></div>
-        <div id="visitStats" class="muted small">Loading…</div>
-      </div>` : ''}
       <div class="pf-cal card pf-card">
         <div class="sec-title"><h3>Daily PnL</h3>
           <div class="cal-nav"><button class="btn-ghost small" id="calPrev" aria-label="Previous month">‹</button><span class="m" id="calMonth"></span><button class="btn-ghost small" id="calNext" aria-label="Next month">›</button></div>
@@ -1821,29 +1799,7 @@ async function renderProfile() {
   }
   renderProfileLive();
 }
-async function loadVisitStats() {
-  const el = $('#visitStats');
-  if (!el || !S.user?.isOwner) return;
-  try {
-    const v = await api('/api/owner/stats');
-    const max = Math.max(1, ...v.days.map((d) => d.visitors));
-    const lbl = (d) => new Date(`${d}T12:00:00`).toLocaleDateString([], { month: 'short', day: 'numeric' });
-    const tile = (k, n, s = '') => `<div class="vs-tile"><span class="k">${k}</span><b>${fmtInt(n)}</b>${s ? `<span class="s">${s}</span>` : ''}</div>`;
-    el.classList.remove('muted', 'small');
-    el.innerHTML = `<div class="vs-tiles">
-        ${tile('Today', v.today)}${tile('Last 7 days', v.last7)}${tile('Last 30 days', v.last30)}${tile('All time', v.allTime, v.since ? `since ${lbl(v.since)}` : 'counting starts now')}${tile('Sign-ups', v.signups, 'other than you')}
-      </div>
-      <div class="vs-chart" role="img" aria-label="Unique visitors per day, last 14 days">${v.days.map((d) => `<div class="vs-col" title="${lbl(d.day)}: ${d.visitors} visitor${d.visitors === 1 ? '' : 's'} (${d.new} new)">
-          <span class="n">${d.visitors || ''}</span><div class="bar" style="height:${(d.visitors / max) * 100}%"><div class="new" style="height:${d.visitors ? (d.new / d.visitors) * 100 : 0}%"></div></div><span class="d">${lbl(d.day).replace(/^\w+ /, '')}</span></div>`).join('')}</div>
-      <div class="vs-legend muted small"><span><i class="sw new"></i>New visitors</span><span><i class="sw ret"></i>Returning</span><span>Last 14 days · unique browsers per day</span></div>
-      <div class="vs-lists">
-        <div><div class="k">Newest sign-ups</div>${v.recentSignups.length ? v.recentSignups.map((s) => `<button class="vs-line" data-player="${esc(s.username)}"><span>${esc(s.username)}</span><span class="muted">${new Date(s.at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span></button>`).join('') : '<div class="muted small">No one else yet.</div>'}</div>
-        <div><div class="k">Where visitors came from</div>${v.refs.length ? v.refs.map((r) => `<div class="vs-line"><span>${esc(r.ref)}</span><b>${fmtInt(r.n)}</b></div>`).join('') : '<div class="muted small">Direct visits only so far (typed or pasted link).</div>'}</div>
-      </div>`;
-  } catch (e) { el.textContent = `Couldn't load visitor stats: ${e.message}`; }
-}
 async function loadProfileData() {
-  loadVisitStats();
   try {
     const [snaps, trades, realized] = await Promise.all([api('/api/me/snapshots?days=400'), api('/api/me/trades?limit=40'), api('/api/me/realized?days=400')]);
     S.snapshots = snaps;
@@ -2272,7 +2228,6 @@ addEventListener('hashchange', route);
   try { S.badgeDefs = await api('/api/badges'); } catch { /* ignore */ }
   try { S.feed = await api('/api/feed'); } catch { /* ignore */ }
   try { await refreshMe(); } catch { /* offline */ }
-  sendVisit();
   connectStream();
   route();
   setInterval(() => { if (S.user) refreshMe().catch(() => {}); }, 30_000);
