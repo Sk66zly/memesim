@@ -821,5 +821,10 @@ module.exports = {
   feedStatus: () => ({ source: state.trendingSource || null, pumpFun: { ok: pumpState.ok, coins: pumpState.list.length, ageSec: pumpState.at ? Math.round((Date.now() - pumpState.at) / 1000) : null, endpoint: pumpState.endpoint, error: pumpState.error } }),
   tapeFor: (a) => state.tape.get(a) || [],
   tokenInfo: (a) => publicToken(state.tokens.get(a)),
+  // for the auto-trader (bot.js)
+  geckoGet: (path) => gecko(path),
+  geckoPaused: () => Date.now() < geckoPausedUntil,
+  candlesOf: (a) => state.candles.get(a) || [],
+  trendingAddresses: () => state.trending.slice(),
   SOL_MINT,
 };
