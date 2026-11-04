@@ -26,6 +26,7 @@
         <button class="tab" role="tab" data-view="trending" aria-selected="true">Explore</button>
         <button class="tab" role="tab" data-view="leaderboard" aria-selected="false">Leaderboard</button>
         <button class="tab" role="tab" data-view="profile" aria-selected="false">Portfolio</button>
+        <button class="tab" role="tab" data-view="bot" aria-selected="false"><span class="t-lg">Auto-trader</span><span class="t-sm" aria-hidden="true">🤖 Bot</span></button>
       </nav>
       <form class="search" id="caSearch" role="search">
         <span class="search-ico" aria-hidden="true">⌕</span>
@@ -213,6 +214,11 @@
     <!-- PROFILE -->
     <section class="view" id="view-profile" data-active="false">
       <div class="profile" id="profile"></div>
+    </section>
+
+    <!-- AUTO-TRADER -->
+    <section class="view" id="view-bot" data-active="false">
+      <div class="bot-page" id="botPage"></div>
     </section>
   </main>
 
