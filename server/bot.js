@@ -127,6 +127,7 @@ function assess(t, st) {
   const checks = [];
   const fail = (text) => checks.push({ ok: false, text });
   const pass = (text) => checks.push({ ok: true, text });
+  const unknown = (text) => checks.push({ ok: null, text }); // data missing: not a failure, but it lowers the safety score
   if (!t?.priceUsd || Date.now() - (t.updatedAt || 0) > 90_000) return { status: 'pending', score: 0, safety: 0, momentum: 0, reason: 'No live price right now', checks };
   const inf = infoFor(t.address);
   const liq = t.liquidity || 0;
@@ -137,13 +138,30 @@ function assess(t, st) {
 
   // --- rug-risk checks (any failure = never buy) ---
   if (inf) {
-    if (inf.mint && inf.mint !== 'no') fail('Creator can still mint more coins'); else pass('Mint authority revoked');
-    if (inf.freeze && inf.freeze !== 'no') fail('Creator can freeze wallets'); else pass('Freeze authority revoked');
+    // Launchpad coins (pump.fun and similar) always have both authorities revoked, even when the data leaves them blank.
+    const launchpad = inf.graduated != null || /pump$/.test(t.address);
+    for (const [key, bad, good, what] of [['mint', 'Creator can still mint more coins', 'Mint authority revoked', 'Mint authority'], ['freeze', 'Creator can freeze wallets', 'Freeze authority revoked', 'Freeze authority']]) {
+      const v = inf[key];
+      if (v === 'no') pass(good);
+      else if (v) fail(bad);
+      else if (launchpad) pass(`${good} (launchpad coin)`);
+      else if (st.needGraduated) fail(`${what} not reported`);
+      else { unknown(`${what} not reported`); safety -= 8; }
+    }
     if (inf.honeypot === 'yes') fail('Honeypot: holders can\'t sell'); else pass('Not flagged as a honeypot');
     if (inf.dev != null) { if (inf.dev > st.maxDev) fail(`Dev wallet holds ${inf.dev.toFixed(1)}%`); else { pass(`Dev holds ${inf.dev.toFixed(1)}%`); safety -= inf.dev * 1.5; } }
     if (inf.holders != null) { if (inf.holders < st.minHolders) fail(`Only ${inf.holders} holders`); else { pass(`${inf.holders.toLocaleString('en-US')} holders`); safety -= clamp(15 - Math.log10(inf.holders) * 4, 0, 10); } }
-    if (inf.top10 != null && inf.top10 > 0 && inf.top10 <= 100) { // >100% means the data includes pools and is unreliable
-      if (inf.top10 > st.maxTop10) fail(`Top 10 wallets own ${inf.top10.toFixed(0)}%`); else { pass(`Top 10 wallets own ${inf.top10.toFixed(0)}%`); safety -= inf.top10 * 0.35; }
+    if (inf.top10 != null && inf.top10 > 0 && inf.top10 <= 100) { // >100% means the data is broken
+      // The top-10 list includes the coin's own liquidity pool (often 30-70% of a pump.fun coin's supply), which isn't a
+      // whale. The pool holds about half the liquidity's value in the coin, so take its share of the supply out first.
+      const fdv = t.marketCap || 0;
+      const poolPct = liq > 0 && fdv > 0 ? clamp((liq / 2 / fdv) * 100, 0, inf.top10) : 0;
+      const top = inf.top10 - poolPct;
+      const big = (inf.holders || 0) >= 50_000 && ageMin != null && ageMin > 30 * 1440; // exchanges/treasuries, not ruggers
+      const label = `Top 10 wallets own ${top.toFixed(0)}%${poolPct >= 1 ? ' (not counting the pool)' : ''}`;
+      if (top > st.maxTop10 && big) { unknown(`${label}, a large established coin`); safety -= 10; }
+      else if (top > st.maxTop10) fail(label);
+      else { pass(label); safety -= top * 0.35; }
     }
     if (inf.gt != null) { if (inf.gt < st.minGt) fail(`Low trust score (${inf.gt.toFixed(0)}/100)`); else { pass(`Trust score ${inf.gt.toFixed(0)}/100`); safety += (inf.gt - 50) * 0.2; } }
     if (st.needGraduated && inf.graduated === false) fail('Still on the pump.fun bonding curve');
@@ -152,7 +170,8 @@ function assess(t, st) {
   }
   if (liq > 0) { if (liq < st.minLiq) fail(`Liquidity only ${fmtK(liq)}`); else pass(`Liquidity ${fmtK(liq)}`); }
   else if (inf?.graduated !== false) fail('No liquidity data');
-  if (liq > 0 && mcap > 0) { const r = liq / mcap; if (r < 0.03) fail('Very thin liquidity for its size'); else safety -= clamp((0.1 - r) * 150, 0, 12); }
+  // a dev can only pull the rug on a small coin's pool; big coins spread liquidity over many pools
+  if (liq > 0 && mcap > 0 && mcap < 20e6) { const r = liq / mcap; if (r < 0.03) fail('Very thin liquidity for its size'); else safety -= clamp((0.1 - r) * 150, 0, 12); }
   if (mcap && mcap < st.minMcap) fail(`Market cap only ${fmtK(mcap)}`);
   if (ageMin != null) { if (ageMin < st.minAgeMin) fail(`Too new (${Math.max(1, Math.round(ageMin))} min old)`); else { pass(`${ageMin >= 120 ? `${Math.round(ageMin / 60)}h` : `${Math.round(ageMin)} min`} old`); if (ageMin < 60) safety -= 8; } }
   if (t.change5m != null && t.change5m < -15) fail(`Dumping (${t.change5m.toFixed(0)}% in 5 min)`);
@@ -160,7 +179,7 @@ function assess(t, st) {
   if (buys != null && sells != null && sells > 10 && sells > buys * 1.8) fail('Heavy selling right now');
   if (cs && cs.fromHigh < -35) fail(`Crashed ${Math.abs(cs.fromHigh).toFixed(0)}% from its 15-min high`);
   safety = clamp(Math.round(safety), 0, 100);
-  const bad = checks.filter((c) => !c.ok);
+  const bad = checks.filter((c) => c.ok === false);
   if (bad.length) return { status: 'reject', score: 0, safety, momentum: 0, reason: bad[0].text, checks };
 
   // --- entry: healthy uptrend, not a chase ---
