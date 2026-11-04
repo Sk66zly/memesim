@@ -6,6 +6,7 @@ const path = require('node:path');
 const market = require('./market');
 const game = require('./game');
 const cloud = require('./cloud');
+const bot = require('./bot');
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC = path.join(__dirname, '..', 'public');
@@ -89,6 +90,7 @@ setInterval(() => {
   for (const b of game.takeNewBadges()) broadcast('badge', { badge: b.badge, detail: b.detail, earnedAt: b.earnedAt }, (c) => c.userId === b.userId);
 }, 1000);
 setInterval(() => broadcast('ping', Date.now()), 20_000);
+bot.events.on('trade', (d) => broadcast('bot', d, (c) => c.userId === d.userId));
 
 function openStream(req, res, url, user) {
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
@@ -162,6 +164,17 @@ async function api(req, res, url) {
 
   if (p === '/api/stream' && m === 'GET') return openStream(req, res, url, user);
 
+  if (p === '/api/bot' && m === 'GET') return send(res, 200, bot.view(needUser().id));
+  if (p === '/api/bot' && m === 'POST') {
+    const u = needUser();
+    if (!rateLimit(`bot:${u.id}`, 30, 60_000)) throw new game.GameError('Slow down a little.', 429);
+    bot.updateSettings(u.id, await readBody(req));
+    return send(res, 200, bot.view(u.id));
+  }
+  if (p === '/api/bot/info' && m === 'POST') {
+    if (!rateLimit(`botinfo:${ip(req)}`, 30, 60_000)) throw new game.GameError('Slow down a little.', 429);
+    return send(res, 200, bot.ingestInfo(await readBody(req)));
+  }
   if (p === '/api/me' && m === 'GET') {
     if (!user) return send(res, 200, { user: null, mode: market.mode });
     return send(res, 200, { user: game.account(user.id), mode: market.mode });
@@ -240,6 +253,7 @@ async function main() {
     process.exit(1);
   }
   await market.start(log);
+  bot.start();
   game.takeSnapshots();
   game.checkTimedBadges();
   setInterval(() => game.takeSnapshots(), game.CFG.snapshotMinutes * 60_000);
