@@ -1797,7 +1797,7 @@ function renderBot() {
     return `<div class="scan-row ${S.botOpenScan === c.address ? 'open' : ''}" data-addr="${esc(c.address)}">
       <div class="scan-main">${coinImg(c, 'coin-img')}<b class="sym">${esc(c.symbol)}</b><span class="verdict ${vc}">${vt}</span>
         <span class="why muted">${esc(c.reason)}</span><span class="sc">${c.status === 'reject' || c.status === 'pending' ? '' : c.score}</span></div>
-      <div class="scan-checks">${c.checks.map((k) => `<span class="${k.ok ? 'ok' : 'no'}">${k.ok ? '✓' : '✕'} ${esc(k.text)}</span>`).join('') || '<span class="muted">Waiting for data.</span>'}
+      <div class="scan-checks">${c.checks.map((k) => `<span class="${k.ok ? 'ok' : k.ok === null ? 'unk' : 'no'}">${k.ok ? '✓' : k.ok === null ? '?' : '✕'} ${esc(k.text)}</span>`).join('') || '<span class="muted">Waiting for data.</span>'}
         <button class="link-btn" data-open="${esc(c.address)}">Open chart →</button></div>
     </div>`;
   }).join('') : '<div class="muted small">Waiting for the trending list…</div>';
