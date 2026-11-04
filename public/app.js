@@ -173,6 +173,7 @@ function connectStream() {
     renderTicker(true);
   });
   es.addEventListener('badge', (e) => onBadge(JSON.parse(e.data)));
+  es.addEventListener('bot', (e) => onBotTrade(JSON.parse(e.data)));
 }
 
 function setMode(mode) {
@@ -294,6 +295,7 @@ async function refreshMe() {
   updateWatchBtn();
   if (S.view === 'profile') renderProfile();
   if (!had !== !S.user) connectStream(); // reconnect so badge pushes reach us
+  if (!had !== !S.user && S.view === 'bot') { $('#botPage').dataset.built = ''; loadBot(); }
 }
 
 // ================= coin list =================
@@ -1187,7 +1189,7 @@ function renderPositions() {
       <div class="prow" data-addr="${esc(p.address)}" role="button" tabindex="0" aria-label="Open ${esc(p.symbol)}">
         <div class="prow-main">
           ${coinImg(p, 'coin-img prow-img')}
-          <div class="prow-id"><b>${esc(p.symbol)}</b><span class="muted" data-f="sub"></span></div>
+          <div class="prow-id"><b>${esc(p.symbol)}${p.bot ? ' <span class="bot-tag" title="Bought by your auto-trader">🤖</span>' : ''}</b><span class="muted" data-f="sub"></span></div>
           <div class="prow-val"><b data-f="val"></b><span class="prow-pnl" data-f="pnl"></span></div>
         </div>
         <div class="prow-foot">
@@ -1644,6 +1646,184 @@ function renderTicker(fresh) {
   inner.innerHTML = items.join('') + items.join('');
 }
 
+// ================= auto-trader =================
+// The bot runs on the server (so it keeps going when this tab is closed). This page shows its settings,
+// what it holds, what it did, and its live safety scan of every trending coin.
+let botTimer = null;
+const BOT_KIND = { buy: ['🟢', 'Bought'], profit: ['💰', 'Profit'], stop: ['🛑', 'Stop'], rug: ['🚨', 'Rug warning'], time: ['⏱', 'Time exit'], on: ['🤖', 'On'], off: ['⏸', 'Off'], info: ['·', ''] };
+const VERDICT = { buy: ['Buy signal', 'v-buy'], watch: ['Watching', 'v-watch'], pending: ['Checking', 'v-pending'], reject: ['Avoid', 'v-reject'] };
+async function loadBot() {
+  if (!S.user) { S.bot = null; renderBot(); return; }
+  try {
+    S.bot = await api('/api/bot');
+    renderBot();
+    relayBotInfo();
+  } catch (e) { if (S.view === 'bot') toast(esc(e.message), 'err'); }
+}
+async function saveBot(change) {
+  try {
+    S.bot = await api('/api/bot', change);
+    renderBot();
+    if (change.enabled === true) toast(`🤖 <b>Auto-trader on</b><br><span class="muted">${esc(S.bot.styles[S.bot.settings.style].label)} · it checks coins every 10 seconds</span>`, 'info');
+    if (change.enabled === false) toast('Auto-trader off. Coins it bought stay in your positions.', 'info');
+    refreshMe().catch(() => {});
+  } catch (e) { toast(esc(e.message), 'err'); renderBot(); }
+}
+// Safety data (holders, mint/freeze authority) comes from GeckoTerminal. When the server is rate-limited,
+// this browser fetches it for one coin at a time and passes it on, like it does for prices.
+const botInfoTried = new Map();
+let botInfoBusy = false;
+async function relayBotInfo() {
+  if (botInfoBusy || !S.bot?.needInfo?.length) return;
+  const a = S.bot.needInfo.find((x) => Date.now() - (botInfoTried.get(x) || 0) > 120_000);
+  if (!a) return;
+  botInfoBusy = true;
+  botInfoTried.set(a, Date.now());
+  try {
+    const j = await getJ(`${GT}/networks/solana/tokens/${a}/info`);
+    const at = j?.data?.attributes;
+    if (at) await api('/api/bot/info', { address: a, attributes: { holders: at.holders, developer_holding_percentage: at.developer_holding_percentage, mint_authority: at.mint_authority, freeze_authority: at.freeze_authority, is_honeypot: at.is_honeypot, gt_score: at.gt_score, launchpad_details: at.launchpad_details } });
+  } catch { /* GeckoTerminal busy; try again later */ } finally { botInfoBusy = false; }
+}
+function botPerCoin(b) {
+  const st = b.styles[b.settings.style];
+  const invested = b.positions.reduce((s, p) => s + p.qty * p.entry, 0);
+  const cap = (b.settings.budgetPct / 100) * ((S.user?.usd || 0) + invested);
+  return { cap, per: cap / st.maxPositions };
+}
+function renderBot() {
+  const root = $('#botPage');
+  if (!root || S.view !== 'bot') return;
+  if (!S.user) {
+    root.dataset.built = '';
+    root.innerHTML = `<div class="guest card"><h2>🤖 Auto-trader</h2>
+      <p class="muted">A bot that trades your mock money for you: it skips coins that look like rugs, buys healthy uptrends and takes profit automatically.</p>
+      <button class="exec buy" style="max-width:280px;width:100%" data-auth="signup">Create free account</button>
+      <p><button class="link-btn" data-auth="login">I already have one</button></p></div>`;
+    return;
+  }
+  const b = S.bot;
+  if (!b) { root.innerHTML = '<div class="card bot-loading muted">Loading auto-trader…</div>'; root.dataset.built = ''; return; }
+  if (root.dataset.built !== '1') {
+    root.dataset.built = '1';
+    root.innerHTML = `
+      <div class="card bot-hero">
+        <div class="bot-hero-txt">
+          <h1 class="section-title">🤖 Auto-trader</h1>
+          <p class="muted">Trades your mock money for you. It checks every trending coin for rug risk, only buys the ones that pass, then takes profit or cuts losses on its own.</p>
+          <div class="bot-status" id="botStatus"></div>
+        </div>
+        <button class="bot-switch" id="botSwitch" role="switch" aria-checked="false" aria-label="Auto-trader"><span class="knob"></span><span class="lbl"></span></button>
+      </div>
+      <div class="bot-grid">
+        <div class="card pf-card bot-settings">
+          <div class="sec-title"><h3>Style</h3></div>
+          <div class="bot-styles" id="botStyles" role="radiogroup" aria-label="Trading style"></div>
+          <div class="bot-budget">
+            <div class="row"><label for="botBudget">Money it can use</label><b id="botBudgetVal"></b></div>
+            <input type="range" id="botBudget" min="10" max="100" step="5" aria-describedby="botBudgetNote">
+            <div class="muted small" id="botBudgetNote"></div>
+          </div>
+        </div>
+        <div class="card pf-card bot-stats" id="botStats"></div>
+      </div>
+      <div class="card pf-card">
+        <div class="sec-title"><h3>Bot positions</h3><span class="muted small">Only coins the bot bought. It never touches your own trades.</span></div>
+        <div id="botPositions"></div>
+      </div>
+      <div class="bot-grid two">
+        <div class="card pf-card">
+          <div class="sec-title"><h3>Activity</h3></div>
+          <div class="bot-log" id="botLog"></div>
+        </div>
+        <div class="card pf-card">
+          <div class="sec-title"><h3>Safety scan</h3><span class="muted small" id="botScanAge"></span></div>
+          <div class="bot-scan" id="botScan"></div>
+        </div>
+      </div>
+      <p class="bot-fine muted small">Mock money only. The checks catch common rug signs (mint/freeze authority, honeypots, whale and dev wallets, thin liquidity, brand-new coins, dumps), but no bot can spot every rug, and memecoins can drop to zero in seconds. The bot runs on the server and checks every 10 seconds; on the free hosting plan the server sleeps when nobody has the site open, and the bot pauses with it.</p>`;
+    $('#botSwitch').addEventListener('click', () => saveBot({ enabled: !S.bot.settings.enabled }));
+    $('#botStyles').addEventListener('click', (e) => { const x = e.target.closest('[data-style]'); if (x && x.dataset.style !== S.bot.settings.style) saveBot({ style: x.dataset.style }); });
+    const rng = $('#botBudget');
+    rng.addEventListener('input', () => { rng.dataset.dragging = '1'; S.bot.settings.budgetPct = Number(rng.value); renderBotBudget(); });
+    rng.addEventListener('change', () => { delete rng.dataset.dragging; saveBot({ budgetPct: Number(rng.value) }); });
+    $('#botScan').addEventListener('click', (e) => {
+      const row = e.target.closest('.scan-row');
+      if (e.target.closest('[data-open]')) { location.hash = `coin/${e.target.closest('[data-open]').dataset.open}`; return; }
+      if (row) { row.classList.toggle('open'); S.botOpenScan = row.classList.contains('open') ? row.dataset.addr : null; }
+    });
+    $('#botPositions').addEventListener('click', (e) => { const r = e.target.closest('[data-open]'); if (r) location.hash = `coin/${r.dataset.open}`; });
+  }
+  const on = b.settings.enabled;
+  const st = b.styles[b.settings.style];
+  const sw = $('#botSwitch');
+  sw.setAttribute('aria-checked', on);
+  sw.querySelector('.lbl').textContent = on ? 'ON' : 'OFF';
+  const last = b.log.find((l) => l.kind !== 'on' && l.kind !== 'off');
+  $('#botStatus').innerHTML = on
+    ? `<span class="pill on"><i></i>Running · ${esc(st.label)}</span><span class="muted">${b.mode === 'demo' ? 'Demo market · ' : ''}${last ? esc(last.text) : 'Starting its first scan…'}</span>`
+    : `<span class="pill off"><i></i>Off</span><span class="muted">Turn it on and it starts scanning within 10 seconds.</span>`;
+  $('#botStyles').innerHTML = Object.entries(b.styles).map(([k, s]) => `
+    <button class="bot-style ${k === b.settings.style ? 'sel' : ''}" data-style="${k}" role="radio" aria-checked="${k === b.settings.style}">
+      <b>${esc(s.label)}</b><span>${esc(s.blurb)}</span>
+      <small>Up to ${s.maxPositions} coins · sell half at +${s.tp1}% · stop −${s.stop}%</small>
+    </button>`).join('');
+  const rng = $('#botBudget');
+  if (!rng.dataset.dragging) rng.value = b.settings.budgetPct;
+  renderBotBudget();
+  const s = b.stats;
+  const open = b.positions.reduce((a, p) => a + p.pnlUsd, 0);
+  $('#botStats').innerHTML = `<div class="sec-title"><h3>Bot results</h3></div>
+    <div class="bot-kpis">
+      <div><span class="k">Realized profit</span><b class="${cls(s.realized)}">${fmtUsd(s.realized, { sign: true })}</b></div>
+      <div><span class="k">Open positions</span><b class="${cls(open)}">${fmtUsd(open, { sign: true })}</b></div>
+      <div><span class="k">Win rate</span><b>${s.sells ? Math.round((s.wins / s.sells) * 100) + '%' : '—'}</b><span class="s">${s.wins}/${s.sells} sells in profit</span></div>
+      <div><span class="k">Coins bought</span><b>${s.buys}</b></div>
+    </div>`;
+  $('#botPositions').innerHTML = b.positions.length ? b.positions.map((p) => `
+    <div class="bot-pos" data-open="${esc(p.address)}" role="button" tabindex="0">
+      ${coinImg(p, 'coin-img')}
+      <div class="id"><b>${esc(p.symbol)}</b><span class="muted small">${esc(p.plan)}</span></div>
+      <div class="r"><b>${fmtUsd(p.value)}</b><span class="${cls(p.pnlUsd)} small">${fmtUsd(p.pnlUsd, { sign: true })} (${fmtPct(p.pnlPct, 1)})</span></div>
+      <div class="r muted small when">held ${ago(p.openedAt)}<br>entry ${fmtPrice(p.entry)}</div>
+    </div>`).join('') : `<div class="muted small bot-empty">${on ? 'Nothing yet. It buys when a coin passes every check.' : 'Turn the auto-trader on to start.'}</div>`;
+  $('#botLog').innerHTML = b.log.length ? b.log.slice(0, 40).map((l) => {
+    const [ic] = BOT_KIND[l.kind] || BOT_KIND.info;
+    return `<div class="log-row k-${esc(l.kind)}"><span class="ic">${ic}</span><span class="tx">${esc(l.text)}</span><span class="t muted">${ago(l.ts)}</span></div>`;
+  }).join('') : '<div class="muted small">No activity yet.</div>';
+  $('#botScanAge').textContent = b.scannedAt ? `${esc(st.label)} rules · updated ${ago(b.scannedAt)} ago` : '';
+  $('#botScan').innerHTML = b.scan.length ? b.scan.map((c) => {
+    const [vt, vc] = VERDICT[c.status];
+    return `<div class="scan-row ${S.botOpenScan === c.address ? 'open' : ''}" data-addr="${esc(c.address)}">
+      <div class="scan-main">${coinImg(c, 'coin-img')}<b class="sym">${esc(c.symbol)}</b><span class="verdict ${vc}">${vt}</span>
+        <span class="why muted">${esc(c.reason)}</span><span class="sc">${c.status === 'reject' || c.status === 'pending' ? '' : c.score}</span></div>
+      <div class="scan-checks">${c.checks.map((k) => `<span class="${k.ok ? 'ok' : 'no'}">${k.ok ? '✓' : '✕'} ${esc(k.text)}</span>`).join('') || '<span class="muted">Waiting for data.</span>'}
+        <button class="link-btn" data-open="${esc(c.address)}">Open chart →</button></div>
+    </div>`;
+  }).join('') : '<div class="muted small">Waiting for the trending list…</div>';
+}
+function renderBotBudget() {
+  const b = S.bot;
+  if (!b || !$('#botBudgetVal')) return;
+  const { cap, per } = botPerCoin(b);
+  $('#botBudgetVal').textContent = `${b.settings.budgetPct}% · ${fmtUsd(cap)}`;
+  $('#botBudgetNote').textContent = `About ${fmtUsd(per)} per coin, up to ${b.styles[b.settings.style].maxPositions} coins at once. It only spends mock USD, never SOL.`;
+}
+function onBotTrade(d) {
+  const sell = d.side === 'sell';
+  toast(sell
+    ? `🤖 <b>Sold ${esc(d.symbol)}</b> <span class="${cls(d.pnlUsd)}">${fmtUsd(d.pnlUsd, { sign: true })} (${fmtPct(d.pnlPct, 1)})</span><br><span class="muted">${esc(d.why)}</span>`
+    : `🤖 <b>Bought ${esc(d.symbol)}</b> for ${fmtUsd(d.usd)}<br><span class="muted">Passed the safety checks · ${esc(d.why)}</span>`, 'info', 5000);
+  sfx.play(d.side);
+  if (sell) noteRealized({ side: 'sell', pnlUsd: d.pnlUsd });
+  refreshMe().catch(() => {});
+  if (S.view === 'bot') loadBot();
+}
+setInterval(() => {
+  if (!S.user || document.hidden) return;
+  if (S.view === 'bot' || S.bot?.settings?.enabled) loadBot();
+}, 6000);
+
 // ================= leaderboard =================
 let lbTimer = null;
 async function loadLeaderboard() {
@@ -1652,7 +1832,7 @@ async function loadLeaderboard() {
     const rows = $('#lbRows');
     const row = (r, extra = '') => `<div class="lb-row ${r.rank <= 3 ? 'top' + r.rank : ''} ${r.isMe ? 'me' : ''}" role="row">
         <span class="lb-rank" role="cell">#${r.rank}</span>
-        <span class="lb-name" role="cell"><button class="lb-player" data-player="${esc(r.username)}" title="View profile">${avatarHtml(r)}<span class="nm">${esc(r.username)}${esc(extra)}</span></button>${r.isMe ? '<span class="you-tag">YOU</span>' : ''}${badgeIcons(r.badges)}</span>
+        <span class="lb-name" role="cell"><button class="lb-player" data-player="${esc(r.username)}" title="View profile">${avatarHtml(r)}<span class="nm">${esc(r.username)}${esc(extra)}</span></button>${r.isMe ? '<span class="you-tag">YOU</span>' : ''}${r.bot ? '<span class="bot-tag" title="Auto-trader is on">🤖</span>' : ''}${badgeIcons(r.badges)}</span>
         <span class="lb-pnl r ${cls(r.profit)}" role="cell">${fmtUsd(r.profit, { sign: true })}</span>
         <span class="r hide-sm ${cls(r.profitPct)}" role="cell">${fmtPct(r.profitPct, 1)}</span>
         <span class="r hide-sm muted" role="cell">${fmtUsd(r.value, { compact: true })}</span>
@@ -2205,13 +2385,14 @@ function route() {
     renderCoinList();
     renderHomeSide();
   }
-  if (!['trending', 'leaderboard', 'profile'].includes(view)) view = 'trending';
+  if (!['trending', 'leaderboard', 'profile', 'bot'].includes(view)) view = 'trending';
   S.view = view;
   $$('.tab').forEach((t) => t.setAttribute('aria-selected', t.dataset.view === view));
   $$('.view').forEach((v) => { v.dataset.active = v.id === `view-${view}`; });
   clearInterval(lbTimer);
   if (view === 'leaderboard') { loadLeaderboard(); lbTimer = setInterval(loadLeaderboard, 15_000); }
   if (view === 'profile') renderProfile();
+  if (view === 'bot') { renderBot(); loadBot(); }
   if (view !== 'trending') closePositions();
   if (view === 'trending' && !h.startsWith('coin/')) document.title = 'MemeSim — Memecoin Paper Trading';
 }
