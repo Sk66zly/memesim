@@ -111,6 +111,26 @@ CREATE TABLE IF NOT EXISTS badges (
   detail     TEXT,
   PRIMARY KEY (user_id, badge)
 );
+
+-- Auto-trader (bot.js): off by default; each player's own settings and the positions their bot opened.
+CREATE TABLE IF NOT EXISTS bots (
+  user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  enabled     INTEGER NOT NULL DEFAULT 0,
+  style       TEXT NOT NULL DEFAULT 'balanced',
+  budget_pct  REAL NOT NULL DEFAULT 50,
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bot_positions (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token      TEXT NOT NULL,
+  qty        REAL NOT NULL,
+  entry      REAL NOT NULL,
+  peak       REAL NOT NULL,
+  entry_liq  REAL,
+  tp_done    INTEGER NOT NULL DEFAULT 0,
+  opened_at  INTEGER NOT NULL,
+  PRIMARY KEY (user_id, token)
+);
 `;
 db.exec(SCHEMA);
 
@@ -119,6 +139,7 @@ const ADDED_COLUMNS = [
   ['users', 'avatar', 'TEXT'],
   ['users', 'color', 'TEXT'],
   ['users', 'bio', 'TEXT'],
+  ['trades', 'bot', 'INTEGER'],
 ];
 for (const [table, column, type] of ADDED_COLUMNS) {
   const has = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
@@ -137,6 +158,8 @@ const TABLES = {
   watchlist: ['user_id', 'token'],
   deposits: ['id'],
   avatars: ['user_id'],
+  bots: ['user_id'],
+  bot_positions: ['user_id', 'token'],
 };
 
 // Small helper so multi-step writes either fully happen or not at all.
