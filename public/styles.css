@@ -433,6 +433,7 @@ main { max-width: 1440px; margin: 0 auto; padding: 18px max(18px, env(safe-area-
 .scan-checks span { padding: 3px 8px; border-radius: 6px; background: var(--surface-2); }
 .scan-checks .ok { color: var(--up); }
 .scan-checks .no { color: var(--down); }
+.scan-checks .unk { color: var(--amber); }
 .scan-checks .link-btn { font-size: 12px; }
 .bot-fine { line-height: 1.55; max-width: 900px; margin: 0; }
 .bot-tag { font-size: 12px; margin-left: 4px; }
