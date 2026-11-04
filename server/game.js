@@ -127,6 +127,7 @@ function priceFor(address) {
 }
 
 function positionsFor(userId) {
+  const botTokens = new Set(db.prepare('SELECT token FROM bot_positions WHERE user_id = ?').all(userId).map((r) => r.token));
   return db.prepare('SELECT * FROM positions WHERE user_id = ? AND qty > 0 ORDER BY opened_at').all(userId).map((p) => {
     const price = priceFor(p.token);
     const info = market.tokenInfo(p.token) || db.prepare('SELECT symbol, name, image FROM tokens WHERE address = ?').get(p.token) || {};
@@ -136,7 +137,7 @@ function positionsFor(userId) {
       address: p.token, symbol: info.symbol || '?', name: info.name || '', image: info.image || null,
       qty: p.qty, avgEntry: avg, costUsd: p.cost_usd, price, value,
       pnlUsd: value - p.cost_usd, pnlPct: p.cost_usd > 0 ? (value / p.cost_usd - 1) * 100 : 0,
-      openedAt: p.opened_at, lastBuyAt: p.last_buy_at,
+      openedAt: p.opened_at, lastBuyAt: p.last_buy_at, bot: botTokens.has(p.token),
     };
   });
 }
@@ -342,8 +343,8 @@ async function trade(userId, body) {
         db.prepare('UPDATE positions SET qty = qty + ?, cost_usd = cost_usd + ?, last_buy_at = ? WHERE user_id = ? AND token = ?')
           .run(qty, usdCost, now, userId, address);
       }
-      db.prepare(`INSERT INTO trades (user_id, token, symbol, side, qty, price, usd_value, currency, sol_price, ts)
-                  VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, ?, ?)`).run(userId, address, info.symbol || '?', qty, price, usdCost, currency, sol || null, now);
+      db.prepare(`INSERT INTO trades (user_id, token, symbol, side, qty, price, usd_value, currency, sol_price, ts, bot)
+                  VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, ?, ?, ?)`).run(userId, address, info.symbol || '?', qty, price, usdCost, currency, sol || null, now, body.bot ? 1 : null);
       return { side, qty, price, usdValue: usdCost, currency, symbol: info.symbol };
     }
 
@@ -373,14 +374,15 @@ async function trade(userId, body) {
       .run(remaining <= 1e-12 ? 0 : remaining, remaining <= 1e-12 ? 0 : Math.max(0, pos.cost_usd - costPart), userId, address);
     if (currency === 'USD') db.prepare('UPDATE users SET usd = usd + ? WHERE id = ?').run(proceeds, userId);
     else db.prepare('UPDATE users SET sol = sol + ? WHERE id = ?').run(proceeds / sol, userId);
-    db.prepare(`INSERT INTO trades (user_id, token, symbol, side, qty, price, usd_value, currency, sol_price, pnl_usd, pnl_pct, ts)
-                VALUES (?, ?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(userId, address, info.symbol || '?', qty, price, proceeds, currency, sol || null, pnlUsd, pnlPct, now);
+    db.prepare(`INSERT INTO trades (user_id, token, symbol, side, qty, price, usd_value, currency, sol_price, pnl_usd, pnl_pct, ts, bot)
+                VALUES (?, ?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(userId, address, info.symbol || '?', qty, price, proceeds, currency, sol || null, pnlUsd, pnlPct, now, body.bot ? 1 : null);
 
-    if (now - pos.last_buy_at < 5 * 60_000) {
+    // badges are for your own trading, so the auto-trader's sells don't earn them
+    if (!body.bot && now - pos.last_buy_at < 5 * 60_000) {
       award(userId, 'paper_hands', `Sold ${info.symbol || 'a token'} ${Math.round((now - pos.last_buy_at) / 1000)}s after buying`);
     }
-    if (pnlPct > 500) award(userId, 'moonshot', `+${pnlPct.toFixed(0)}% on ${info.symbol || 'a token'}`);
+    if (!body.bot && pnlPct > 500) award(userId, 'moonshot', `+${pnlPct.toFixed(0)}% on ${info.symbol || 'a token'}`);
     return { side, qty, price, usdValue: proceeds, currency, symbol: info.symbol, pnlUsd, pnlPct, closed: remaining <= 1e-12 };
   });
   account(userId); // re-checks whale status
@@ -447,6 +449,7 @@ function leaderboard(range, meId) {
   const baseAt = start == null ? null : db.prepare('SELECT profit FROM snapshots WHERE user_id = ? AND ts <= ? ORDER BY ts DESC LIMIT 1');
   const earliest = db.prepare('SELECT profit FROM snapshots WHERE user_id = ? ORDER BY ts ASC LIMIT 1');
 
+  const botOn = new Set(db.prepare('SELECT user_id FROM bots WHERE enabled = 1').all().map((r) => r.user_id));
   const rows = db.prepare('SELECT * FROM users').all().map((u) => {
     const v = accountValue(u);
     let baseline = 0;
@@ -457,7 +460,7 @@ function leaderboard(range, meId) {
     const gain = v.profit - baseline;
     const base = u.net_deposits + baseline;
     return {
-      userId: u.id, username: u.username, avatar: u.avatar || null, color: u.color || null, photoUrl: photoUrlFor(u.id, photos), value: v.value, profit: gain,
+      userId: u.id, username: u.username, bot: botOn.has(u.id), avatar: u.avatar || null, color: u.color || null, photoUrl: photoUrlFor(u.id, photos), value: v.value, profit: gain,
       profitPct: base > 0 ? (gain / base) * 100 : 0,
       badges: badges.get(u.id) || [],
     };
@@ -475,7 +478,8 @@ function resetAccount(userId, body) {
   if (body?.confirm !== 'RESET') throw new GameError('Confirm the restart first.');
   const now = Date.now();
   tx(() => {
-    for (const t of ['positions', 'trades', 'snapshots', 'deposits', 'badges']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(userId);
+    for (const t of ['positions', 'trades', 'snapshots', 'deposits', 'badges', 'bot_positions']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(userId);
+    db.prepare('UPDATE bots SET enabled = 0, updated_at = ? WHERE user_id = ?').run(now, userId);
     db.prepare('UPDATE users SET usd = ?, sol = 0, net_deposits = ?, faucet_at = 0, created_at = ? WHERE id = ?').run(CFG.startingUsd, CFG.startingUsd, now, userId);
     db.prepare('INSERT INTO snapshots (user_id, ts, value, net_deposits, profit) VALUES (?, ?, ?, ?, 0)').run(userId, now, CFG.startingUsd, CFG.startingUsd);
   });
