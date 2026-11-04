@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS badges (
   PRIMARY KEY (user_id, badge)
 );
 
--- Auto-trader (bot.js): off by default; each player's own settings and the positions their bot opened.
+-- Auto-trader (bot.js): off by default. Each player's own settings and the positions their bot opened.
 CREATE TABLE IF NOT EXISTS bots (
   user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   enabled     INTEGER NOT NULL DEFAULT 0,
